@@ -246,6 +246,59 @@ describe("buildCacheTimerLine", () => {
 		assert.equal(visibleWidth(plain), 78);
 	});
 
+	it("renders git summary on the left and TTL badge on the right when space allows", () => {
+		const line = buildCacheTimerLine(
+			{
+				elapsedMs: 36_000,
+				ttlMs: 300_000,
+				columns: 80,
+				hasContext: true,
+				isProcessing: false,
+				gitSummary: "main* · 2 dosya",
+			},
+			paint,
+		);
+		const plain = stripAnsi(line);
+		assert.ok(plain.startsWith("main* · 2 dosya"));
+		assert.ok(plain.endsWith("36sn / 5dk"));
+		assert.equal(visibleWidth(line), 78);
+	});
+
+	it("renders git summary even before first prompt when context is false", () => {
+		const line = buildCacheTimerLine(
+			{
+				elapsedMs: 0,
+				ttlMs: 300_000,
+				columns: 80,
+				hasContext: false,
+				isProcessing: false,
+				gitSummary: "main · clean",
+			},
+			paint,
+		);
+		const plain = stripAnsi(line);
+		assert.equal(plain, "main · clean");
+	});
+
+	it("progressively truncates or drops git summary on narrow viewports", () => {
+		const cols = 28;
+		const line = buildCacheTimerLine(
+			{
+				elapsedMs: 36_000,
+				ttlMs: 300_000,
+				columns: cols,
+				hasContext: true,
+				isProcessing: false,
+				gitSummary: "feature-long-branch-name* · 5 dosya",
+			},
+			paint,
+		);
+		const visW = visibleWidth(line);
+		assert.ok(visW <= cols - 2);
+		const plain = stripAnsi(line);
+		assert.ok(plain.endsWith("36sn / 5dk"));
+	});
+
 	it("progressively collapses layout on narrow viewports without exceeding width", () => {
 		const widths = [120, 80, 60, 45, 30, 20, 10, 5, 2, 1];
 		for (const cols of widths) {

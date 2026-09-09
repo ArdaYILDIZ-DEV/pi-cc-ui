@@ -378,6 +378,7 @@ export interface CacheTimerFrameState {
 	readonly columns: number;
 	readonly hasContext: boolean;
 	readonly isProcessing: boolean;
+	readonly gitSummary?: string | null;
 }
 
 export interface CacheTimerPaint {
@@ -402,7 +403,7 @@ export function buildCacheTimerLine(
 	state: CacheTimerFrameState,
 	paint: CacheTimerPaint,
 ): string {
-	if (!state || !state.hasContext) {
+	if (!state || (!state.hasContext && !state.gitSummary)) {
 		return "";
 	}
 
@@ -413,6 +414,19 @@ export function buildCacheTimerLine(
 	const cols = Math.max(0, Math.floor(rawCols));
 	// Pi's Text component in widgets applies paddingX: 1 (1 char margin left and right)
 	const availableWidth = Math.max(1, cols - 2);
+
+	const rawGit =
+		typeof state.gitSummary === "string" ? state.gitSummary.trim() : "";
+	const hasGit = rawGit.length > 0;
+
+	// Case 1: No context yet (new session before first request), but gitSummary is present
+	if (!state.hasContext) {
+		if (!hasGit) return "";
+		if (availableWidth < visibleWidth(rawGit)) {
+			return paint.dim(truncateToWidth(rawGit, availableWidth));
+		}
+		return paint.dim(rawGit);
+	}
 
 	const ttlMs =
 		typeof state.ttlMs === "number" &&
@@ -447,6 +461,22 @@ export function buildCacheTimerLine(
 		return paint.colorize(trunc, color);
 	}
 
+	// When git summary is also present, format dual layout: git on left, TTL on right
+	if (hasGit) {
+		const gitWidth = visibleWidth(rawGit);
+		if (availableWidth >= gitWidth + badgeWidth + 2) {
+			const pad = availableWidth - gitWidth - badgeWidth;
+			return paint.dim(rawGit) + " ".repeat(pad) + fullBadge;
+		}
+
+		if (availableWidth >= badgeWidth + 8) {
+			const maxGitWidth = availableWidth - badgeWidth - 2;
+			const fittedGit = truncateToWidth(rawGit, maxGitWidth);
+			const pad = availableWidth - visibleWidth(fittedGit) - badgeWidth;
+			return paint.dim(fittedGit) + " ".repeat(pad) + fullBadge;
+		}
+	}
+
 	const pad = Math.max(0, availableWidth - badgeWidth);
 	return " ".repeat(pad) + fullBadge;
 }
@@ -479,6 +509,7 @@ export interface CacheTimerOptions {
 	readonly ttlMs?: number;
 	readonly soundEnabled?: boolean;
 	readonly soundPlayer?: SoundPlayerFn;
+	readonly gitInfoProvider?: () => string | null;
 }
 
 export class CacheTimerController {
@@ -488,6 +519,7 @@ export class CacheTimerController {
 	private isVisible = true;
 	private isSoundEnabled = true;
 	private soundPlayer: SoundPlayerFn = playAudio;
+	private gitInfoProvider: (() => string | null) | null = null;
 	private readonly firedMilestones = new Set<string>();
 	private consecutiveWidgetErrors = 0;
 	private cachedThemeName: string | undefined = undefined;
@@ -511,6 +543,17 @@ export class CacheTimerController {
 		if (typeof opts.soundPlayer === "function") {
 			this.soundPlayer = opts.soundPlayer;
 		}
+		if (typeof opts.gitInfoProvider === "function") {
+			this.gitInfoProvider = opts.gitInfoProvider;
+		}
+	}
+
+	public getGitInfoProvider(): (() => string | null) | null {
+		return this.gitInfoProvider;
+	}
+
+	public setGitInfoProvider(provider: (() => string | null) | null): void {
+		this.gitInfoProvider = typeof provider === "function" ? provider : null;
 	}
 
 	public getTtlMs(): number {
@@ -751,10 +794,12 @@ export class CacheTimerController {
 		}
 
 		try {
-			// If explicitly toggled off or no context yet, hide widget
+			const gitSummary = this.gitInfoProvider ? this.gitInfoProvider() : null;
+
+			// If explicitly toggled off or (no context yet and no git summary), hide widget
 			if (
 				!this.isVisible ||
-				(this.lastContextTimestamp === null && !this.isProcessing)
+				(this.lastContextTimestamp === null && !this.isProcessing && !gitSummary)
 			) {
 				ctx.ui.setWidget("cache-timer", undefined, { placement: "belowEditor" });
 				this.consecutiveWidgetErrors = 0;
@@ -775,6 +820,7 @@ export class CacheTimerController {
 					columns,
 					hasContext: this.lastContextTimestamp !== null || this.isProcessing,
 					isProcessing: this.isProcessing,
+					gitSummary,
 				},
 				paint,
 			);
@@ -829,12 +875,18 @@ export class CacheTimerController {
 
 		if (this.lastContextTimestamp === null) {
 			this.resetMilestones();
-			this.stopLoop();
-			if (ctx.hasUI && ctx.ui?.setWidget) {
-				try {
-					ctx.ui.setWidget("cache-timer", undefined, { placement: "belowEditor" });
-				} catch {
-					/* best-effort */
+			const gitSummary = this.gitInfoProvider ? this.gitInfoProvider() : null;
+			if (gitSummary) {
+				this.startLoop(ctx);
+				this.repaint(ctx);
+			} else {
+				this.stopLoop();
+				if (ctx.hasUI && ctx.ui?.setWidget) {
+					try {
+						ctx.ui.setWidget("cache-timer", undefined, { placement: "belowEditor" });
+					} catch {
+						/* best-effort */
+					}
 				}
 			}
 		} else {
@@ -906,8 +958,11 @@ export class CacheTimerController {
 /**
  * Registers the Cache TTL counter extension.
  */
-export function registerCacheTimer(pi: ExtensionAPI): CacheTimerController {
-	const controller = new CacheTimerController();
+export function registerCacheTimer(
+	pi: ExtensionAPI,
+	options?: CacheTimerOptions,
+): CacheTimerController {
+	const controller = new CacheTimerController(options);
 
 	pi.on("session_start", async (_event, ctx) => {
 		controller.handleSessionStart(ctx as any);
