@@ -14,6 +14,8 @@ import {
 	interpolateRgb,
 	LIGHT_CACHE_STOPS,
 	registerCacheTimer,
+	resolveSoundPath,
+	CACHE_SOUND_MILESTONES,
 	rgbToAnsi,
 	type UiCtx,
 } from "../cache-timer.ts";
@@ -454,6 +456,335 @@ describe("CacheTimerController lifecycle", () => {
 		assert.ok(handlers.has("agent_settled"));
 		assert.ok(handlers.has("session_shutdown"));
 		assert.ok(commands.has("cache"));
+
+		controller.dispose();
+	});
+
+	it("supports audio notification toggle and slash commands", () => {
+		const controller = new CacheTimerController();
+		const mock = createMockUi();
+
+		assert.equal(controller.isAudioEnabled(), true);
+		assert.equal(controller.toggleSound(), false);
+		assert.equal(controller.isAudioEnabled(), false);
+		assert.equal(controller.toggleSound(), true);
+		assert.equal(controller.isAudioEnabled(), true);
+
+		controller.setSoundEnabled(false);
+		assert.equal(controller.isAudioEnabled(), false);
+		controller.setSoundEnabled(true);
+		assert.equal(controller.isAudioEnabled(), true);
+
+		controller.dispose();
+	});
+});
+
+describe("Cache audio warning milestones & playback", () => {
+	function createMockUi() {
+		const widgets = new Map<string, { content?: string[]; placement?: string }>();
+		const notified: string[] = [];
+		const mockTheme = {
+			name: "claude-code-dark",
+			fg: (_token: string, text: string) => text,
+			bg: (_token: string, text: string) => text,
+			bold: (text: string) => text,
+		} as unknown as Theme;
+
+		const ctx = {
+			hasUI: true,
+			ui: {
+				theme: mockTheme,
+				setWidget: (key: string, content?: string[], opts?: any) => {
+					if (content === undefined) {
+						widgets.delete(key);
+					} else {
+						widgets.set(key, { content, placement: opts?.placement });
+					}
+				},
+				notify: (msg: string) => {
+					notified.push(msg);
+				},
+			},
+		} as unknown as UiCtx;
+
+		return { ctx, widgets, notified };
+	}
+
+	it("resolves sound files located in sounds/ directory", () => {
+		const path3 = resolveSoundPath("3.mp3");
+		const path4 = resolveSoundPath("4.mp3");
+		assert.ok(path3 !== null && path3.endsWith("sounds/3.mp3"));
+		assert.ok(path4 !== null && path4.endsWith("sounds/4.mp3"));
+
+		assert.equal(resolveSoundPath("non-existent-sound.mp3"), null);
+		assert.equal(resolveSoundPath(""), null);
+	});
+
+	it("defines correct milestone times and repeats", () => {
+		assert.equal(CACHE_SOUND_MILESTONES.length, 3);
+		// 3. dakika: 180s, 3.mp3, 1 kez
+		assert.equal(CACHE_SOUND_MILESTONES[0]!.elapsedMs, 180_000);
+		assert.equal(CACHE_SOUND_MILESTONES[0]!.soundFile, "3.mp3");
+		assert.equal(CACHE_SOUND_MILESTONES[0]!.repeat, 1);
+
+		// 4. dakika: 240s, 4.mp3, 1 kez
+		assert.equal(CACHE_SOUND_MILESTONES[1]!.elapsedMs, 240_000);
+		assert.equal(CACHE_SOUND_MILESTONES[1]!.soundFile, "4.mp3");
+		assert.equal(CACHE_SOUND_MILESTONES[1]!.repeat, 1);
+
+		// 4.30. dakika: 270s, 4.mp3, 2 kez
+		assert.equal(CACHE_SOUND_MILESTONES[2]!.elapsedMs, 270_000);
+		assert.equal(CACHE_SOUND_MILESTONES[2]!.soundFile, "4.mp3");
+		assert.equal(CACHE_SOUND_MILESTONES[2]!.repeat, 2);
+	});
+
+	it("triggers 3m (once), 4m (once), and 4.30m (twice) sequentially and idempotently", () => {
+		const played: { file: string; repeat: number }[] = [];
+		const controller = new CacheTimerController(300_000, {
+			soundPlayer: (file, repeat = 1) => {
+				played.push({ file, repeat });
+			},
+		});
+
+		const now = 1_000_000_000;
+		controller.setLastContextTimestamp(now);
+
+		// At 2m 59s (179_000 ms) -> No sound
+		controller.checkSoundMilestones(179_000);
+		assert.equal(played.length, 0);
+
+		// At 3m 00s (180_000 ms) -> 3.mp3 plays once
+		controller.checkSoundMilestones(180_000);
+		assert.equal(played.length, 1);
+		assert.ok(played[0]!.file.endsWith("3.mp3"));
+		assert.equal(played[0]!.repeat, 1);
+
+		// At 3m 01s (181_000 ms) -> Still 1 play (no duplicate trigger)
+		controller.checkSoundMilestones(181_000);
+		assert.equal(played.length, 1);
+
+		// At 3m 59s (239_000 ms) -> No additional sound
+		controller.checkSoundMilestones(239_000);
+		assert.equal(played.length, 1);
+
+		// At 4m 00s (240_000 ms) -> 4.mp3 plays once
+		controller.checkSoundMilestones(240_000);
+		assert.equal(played.length, 2);
+		assert.ok(played[1]!.file.endsWith("4.mp3"));
+		assert.equal(played[1]!.repeat, 1);
+
+		// At 4m 01s (241_000 ms) -> No duplicate trigger
+		controller.checkSoundMilestones(241_000);
+		assert.equal(played.length, 2);
+
+		// At 4m 29s (269_000 ms) -> No additional sound
+		controller.checkSoundMilestones(269_000);
+		assert.equal(played.length, 2);
+
+		// At 4m 30s (270_000 ms) -> 4.mp3 plays twice
+		controller.checkSoundMilestones(270_000);
+		assert.equal(played.length, 3);
+		assert.ok(played[2]!.file.endsWith("4.mp3"));
+		assert.equal(played[2]!.repeat, 2);
+
+		// At 4m 31s (271_000 ms) -> No duplicate trigger
+		controller.checkSoundMilestones(271_000);
+		assert.equal(played.length, 3);
+
+		controller.dispose();
+	});
+
+	it("suppresses sound when sound is disabled or agent is processing", () => {
+		const played: { file: string; repeat: number }[] = [];
+		const controller = new CacheTimerController(300_000, {
+			soundEnabled: false,
+			soundPlayer: (file, repeat = 1) => played.push({ file, repeat }),
+		});
+
+		controller.setLastContextTimestamp(Date.now());
+		controller.checkSoundMilestones(180_000);
+		controller.checkSoundMilestones(240_000);
+		controller.checkSoundMilestones(270_000);
+		assert.equal(played.length, 0);
+
+		// Re-enable sound
+		controller.setSoundEnabled(true);
+		controller.checkSoundMilestones(180_000);
+		assert.equal(played.length, 1);
+
+		// If processing, suppress
+		const mock = createMockUi();
+		controller.handleAgentStart(mock.ctx);
+		controller.checkSoundMilestones(240_000);
+		assert.equal(played.length, 1); // Not incremented
+
+		controller.dispose();
+	});
+
+	it("seeds already-passed milestones on resume so sounds do not blast on startup", () => {
+		const played: { file: string; repeat: number }[] = [];
+		const controller = new CacheTimerController(300_000, {
+			soundPlayer: (file, repeat = 1) => played.push({ file, repeat }),
+		});
+		const mock = createMockUi();
+
+		// Session resumed with last message 6 minutes (360s) ago
+		const sixMinutesAgo = new Date(Date.now() - 360_000).toISOString();
+		controller.handleSessionStart({
+			...mock.ctx,
+			sessionManager: {
+				getEntries: () => [{ type: "message", timestamp: sixMinutesAgo }],
+			},
+		});
+
+		// Check milestones for current elapsed (360s)
+		controller.checkSoundMilestones(360_000);
+		assert.equal(
+			played.length,
+			0,
+			"No sound should play for already-expired historical session",
+		);
+
+		controller.dispose();
+	});
+
+	it("resets milestones when a new turn ends and settles", () => {
+		const played: { file: string; repeat: number }[] = [];
+		const controller = new CacheTimerController(300_000, {
+			soundPlayer: (file, repeat = 1) => played.push({ file, repeat }),
+		});
+		const mock = createMockUi();
+
+		controller.setLastContextTimestamp(Date.now());
+		controller.checkSoundMilestones(180_000);
+		assert.equal(played.length, 1);
+
+		// Agent settles after a new turn
+		controller.handleAgentSettled(mock.ctx);
+
+		// In the new turn, reaching 180s plays sound again
+		controller.checkSoundMilestones(180_000);
+		assert.equal(played.length, 2);
+
+		controller.dispose();
+	});
+
+	it("handles slash command /cache sound toggles via registered command", async () => {
+		type HandlerFn = (args: string, ctx: any) => Promise<void>;
+		let registeredHandler: HandlerFn | undefined;
+		const mockPi = {
+			on: () => {},
+			registerCommand: (name: string, opts: any) => {
+				if (name === "cache") registeredHandler = opts.handler;
+			},
+		};
+
+		const controller = registerCacheTimer(mockPi as any);
+		assert.ok(registeredHandler !== undefined);
+		const handler: HandlerFn = registeredHandler;
+
+		const mock = createMockUi();
+		// Test toggle off
+		await handler("sound toggle", mock.ctx);
+		assert.equal(controller.isAudioEnabled(), false);
+		assert.ok(mock.notified.pop()?.includes("kapalı"));
+
+		// Test toggle on
+		await handler("ses toggle", mock.ctx);
+		assert.equal(controller.isAudioEnabled(), true);
+		assert.ok(mock.notified.pop()?.includes("açık"));
+
+		// Test direct off
+		await handler("sound off", mock.ctx);
+		assert.equal(controller.isAudioEnabled(), false);
+		assert.ok(mock.notified.pop()?.includes("kapalı"));
+
+		// Test direct on
+		await handler("sound on", mock.ctx);
+		assert.equal(controller.isAudioEnabled(), true);
+		assert.ok(mock.notified.pop()?.includes("açık"));
+
+		// Test status summary includes sound
+		await handler("", mock.ctx);
+		const summary = mock.notified.pop()!;
+		assert.ok(summary.includes("Sesli uyarı: açık"));
+
+		controller.dispose();
+	});
+
+	it("/cache sound test plays the milestone file without real audio", async () => {
+		type HandlerFn = (args: string, ctx: any) => Promise<void>;
+		let registeredHandler: HandlerFn | undefined;
+		const mockPi = {
+			on: () => {},
+			registerCommand: (name: string, opts: any) => {
+				if (name === "cache") registeredHandler = opts.handler;
+			},
+		};
+
+		const controller = registerCacheTimer(mockPi as any);
+		const played: { file: string; repeat: number }[] = [];
+		controller.setSoundPlayer((file, repeat = 1) =>
+			played.push({ file, repeat }),
+		);
+		const handler: HandlerFn = registeredHandler!;
+		const mock = createMockUi();
+
+		await handler("sound test", mock.ctx);
+		assert.equal(played.length, 1);
+		assert.ok(played[0]!.file.endsWith("sounds/3.mp3"));
+		assert.equal(played[0]!.repeat, 1);
+		assert.ok(mock.notified.pop()?.includes("Ses testi"));
+
+		controller.dispose();
+	});
+
+	it("repaint still fires milestones when widget rendering throws", () => {
+		const played: { file: string; repeat: number }[] = [];
+		const controller = new CacheTimerController(300_000, {
+			soundPlayer: (file, repeat = 1) => played.push({ file, repeat }),
+		});
+		const mock = createMockUi();
+		controller.handleAgentSettled(mock.ctx);
+		assert.equal(controller.getState().hasTimer, true);
+
+		// Break widget rendering only; elapsed passes the 3-minute mark.
+		(mock.ctx.ui as any).setWidget = () => {
+			throw new Error("simulated UI teardown");
+		};
+		controller.setLastContextTimestamp(Date.now() - 181_000);
+		controller.repaint(mock.ctx);
+
+		// Milestone fired despite the widget error, and one transient error
+		// must not kill the 1s loop.
+		assert.equal(played.length, 1);
+		assert.ok(played[0]!.file.endsWith("sounds/3.mp3"));
+		assert.equal(controller.getState().hasTimer, true);
+
+		controller.dispose();
+	});
+
+	it("repaint stops the loop only after repeated widget failures", () => {
+		const controller = new CacheTimerController();
+		const mock = createMockUi();
+		controller.handleAgentSettled(mock.ctx);
+		assert.equal(controller.getState().hasTimer, true);
+
+		(mock.ctx.ui as any).setWidget = () => {
+			throw new Error("simulated UI teardown");
+		};
+		for (let i = 0; i < 4; i++) controller.repaint(mock.ctx);
+		assert.equal(
+			controller.getState().hasTimer,
+			true,
+			"loop survives transient errors",
+		);
+		controller.repaint(mock.ctx);
+		assert.equal(
+			controller.getState().hasTimer,
+			false,
+			"loop stops after repeated failures",
+		);
 
 		controller.dispose();
 	});

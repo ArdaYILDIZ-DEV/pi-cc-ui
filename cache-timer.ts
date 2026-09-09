@@ -6,6 +6,10 @@
  * interpolates color from fresh green (#4EBA65) -> yellow -> orange -> danger red,
  * darkening into deep crimson red as it approaches 5 minutes.
  */
+import { spawn, spawnSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -27,6 +31,172 @@ import {
 } from "./palette.ts";
 
 export const DEFAULT_CACHE_TTL_MS = 300_000; // 5 minutes = 300 seconds
+
+// Widget render failures tolerated in a row before the 1s loop stops itself.
+// A single transient UI error (teardown race) must not freeze the widget or
+// silence milestone sounds; lifecycle events restart the loop via startLoop.
+const MAX_CONSECUTIVE_WIDGET_ERRORS = 5;
+
+// ---------------------------------------------------------------------------
+// Audio notification milestones & playback helpers
+// ---------------------------------------------------------------------------
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+export interface CacheSoundMilestone {
+	readonly id: string;
+	readonly elapsedMs: number;
+	readonly soundFile: string;
+	readonly repeat: number;
+	readonly description: string;
+}
+
+/**
+ * Cache TTL audio warning milestones:
+ * - 3. dakika (180s): 3.mp3 (1 kez)
+ * - 4. dakika (240s): 4.mp3 (1 kez)
+ * - 4.30. dakika (270s): 4.mp3 (2 kez)
+ */
+export const CACHE_SOUND_MILESTONES: readonly CacheSoundMilestone[] = [
+	{
+		id: "m3",
+		elapsedMs: 180_000,
+		soundFile: "3.mp3",
+		repeat: 1,
+		description: "3. dakika uyarısı",
+	},
+	{
+		id: "m4",
+		elapsedMs: 240_000,
+		soundFile: "4.mp3",
+		repeat: 1,
+		description: "4. dakika uyarısı",
+	},
+	{
+		id: "m4_30",
+		elapsedMs: 270_000,
+		soundFile: "4.mp3",
+		repeat: 2,
+		description: "4.30. dakika uyarısı (2 kez)",
+	},
+];
+
+export type SoundPlayerFn = (filePath: string, repeat?: number) => void;
+
+/**
+ * Resolves the absolute path of a sound file inside cc-ui/sounds or cc-ui root.
+ */
+export function resolveSoundPath(filename: string): string | null {
+	if (!filename || typeof filename !== "string") return null;
+	const inSounds = path.join(__dirname, "sounds", filename);
+	if (fs.existsSync(inSounds)) return inSounds;
+	const inRoot = path.join(__dirname, filename);
+	if (fs.existsSync(inRoot)) return inRoot;
+	return null;
+}
+
+let cachedAudioPlayer: {
+	cmd: string;
+	type: "mpv" | "ffplay" | "afplay";
+} | null = null;
+
+/**
+ * Detects an available CLI audio player on the system (mpv, ffplay, afplay).
+ */
+export function detectAudioPlayer(): {
+	cmd: string;
+	type: "mpv" | "ffplay" | "afplay";
+} | null {
+	if (cachedAudioPlayer !== null) {
+		return cachedAudioPlayer;
+	}
+
+	if (process.platform === "darwin") {
+		cachedAudioPlayer = { cmd: "afplay", type: "afplay" };
+		return cachedAudioPlayer;
+	}
+
+	const isWin = process.platform === "win32";
+	const checkCmd = isWin ? "where" : "which";
+
+	for (const candidate of ["mpv", "ffplay"] as const) {
+		try {
+			const res = spawnSync(checkCmd, [candidate], { stdio: "ignore" });
+			if (res.status === 0) {
+				cachedAudioPlayer = { cmd: candidate, type: candidate };
+				return cachedAudioPlayer;
+			}
+		} catch {
+			/* ignore probe failures */
+		}
+	}
+
+	// Negative results are NOT cached: a missing player at first probe (minimal
+	// PATH, player installed later) must not silence warnings forever. Probes
+	// are single `which` calls and cheap enough to repeat per playback.
+	return null;
+}
+
+/**
+ * Plays an audio file in the background without blocking or writing to terminal stdio.
+ */
+export function playAudio(filePath: string, repeat: number = 1): void {
+	if (!filePath || typeof filePath !== "string") return;
+	try {
+		if (!fs.existsSync(filePath)) return;
+	} catch {
+		return;
+	}
+
+	const player = detectAudioPlayer();
+	if (!player) return;
+
+	try {
+		const repeatCount = Math.max(
+			1,
+			Math.floor(Number.isFinite(repeat) ? repeat : 1),
+		);
+		let args: string[] = [];
+
+		if (player.type === "mpv") {
+			args = ["--no-config", "--no-video", "--really-quiet"];
+			for (let i = 0; i < repeatCount; i++) {
+				args.push(filePath);
+			}
+		} else if (player.type === "ffplay") {
+			args = ["-nodisp", "-autoexit", "-loglevel", "quiet"];
+			if (repeatCount > 1) {
+				args.push("-loop", String(repeatCount));
+			}
+			args.push(filePath);
+		} else if (player.type === "afplay") {
+			args = [filePath];
+		}
+
+		const proc = spawn(player.cmd, args, {
+			stdio: "ignore",
+			detached: true,
+		});
+		proc.on("error", () => {
+			/* prevent unhandled error crashes */
+		});
+		proc.unref();
+
+		// For afplay where loop flag isn't supported, trigger subsequent play sequentially
+		if (player.type === "afplay" && repeatCount > 1) {
+			proc.on("exit", () => {
+				try {
+					playAudio(filePath, repeatCount - 1);
+				} catch {
+					/* ignore */
+				}
+			});
+		}
+	} catch {
+		/* best-effort sound playback */
+	}
+}
 
 export interface ColorStop {
 	readonly ratio: number; // 0.0 to 1.0
@@ -298,10 +468,17 @@ export interface CacheTimerStateSnapshot {
 	readonly lastContextTimestamp: number | null;
 	readonly isProcessing: boolean;
 	readonly isVisible: boolean;
+	readonly isSoundEnabled: boolean;
 	readonly elapsedMs: number;
 	readonly ratio: number;
 	readonly isExpired: boolean;
 	readonly hasTimer: boolean;
+}
+
+export interface CacheTimerOptions {
+	readonly ttlMs?: number;
+	readonly soundEnabled?: boolean;
+	readonly soundPlayer?: SoundPlayerFn;
 }
 
 export class CacheTimerController {
@@ -309,17 +486,97 @@ export class CacheTimerController {
 	private lastContextTimestamp: number | null = null;
 	private isProcessing = false;
 	private isVisible = true;
+	private isSoundEnabled = true;
+	private soundPlayer: SoundPlayerFn = playAudio;
+	private readonly firedMilestones = new Set<string>();
+	private consecutiveWidgetErrors = 0;
 	private cachedThemeName: string | undefined = undefined;
 	private cachedPaint: CacheTimerPaint | null = null;
 	private readonly ttlMs: number = DEFAULT_CACHE_TTL_MS;
 	private lastCtx: UiCtx | null = null;
 
-	constructor(ttlMs: number = DEFAULT_CACHE_TTL_MS) {
-		this.ttlMs = ttlMs > 0 ? ttlMs : DEFAULT_CACHE_TTL_MS;
+	constructor(
+		ttlMsOrOptions?: number | CacheTimerOptions,
+		maybeOptions?: CacheTimerOptions,
+	) {
+		const opts: CacheTimerOptions =
+			typeof ttlMsOrOptions === "object" && ttlMsOrOptions !== null
+				? ttlMsOrOptions
+				: (maybeOptions ?? {});
+		const rawTtl =
+			typeof ttlMsOrOptions === "number" ? ttlMsOrOptions : opts.ttlMs;
+		this.ttlMs =
+			typeof rawTtl === "number" && rawTtl > 0 ? rawTtl : DEFAULT_CACHE_TTL_MS;
+		this.isSoundEnabled = opts.soundEnabled ?? true;
+		if (typeof opts.soundPlayer === "function") {
+			this.soundPlayer = opts.soundPlayer;
+		}
 	}
 
 	public getTtlMs(): number {
 		return this.ttlMs;
+	}
+
+	public isAudioEnabled(): boolean {
+		return this.isSoundEnabled;
+	}
+
+	public setSoundEnabled(enabled: boolean): void {
+		this.isSoundEnabled = Boolean(enabled);
+	}
+
+	public toggleSound(): boolean {
+		this.isSoundEnabled = !this.isSoundEnabled;
+		return this.isSoundEnabled;
+	}
+
+	public setSoundPlayer(player: SoundPlayerFn): void {
+		this.soundPlayer = typeof player === "function" ? player : playAudio;
+	}
+
+	public resetMilestones(): void {
+		this.firedMilestones.clear();
+	}
+
+	public seedMilestones(initialElapsedMs: number): void {
+		this.firedMilestones.clear();
+		if (!Number.isFinite(initialElapsedMs) || initialElapsedMs <= 0) return;
+		for (const milestone of CACHE_SOUND_MILESTONES) {
+			if (initialElapsedMs >= milestone.elapsedMs) {
+				this.firedMilestones.add(milestone.id);
+			}
+		}
+	}
+
+	public checkSoundMilestones(elapsedMs: number): void {
+		if (
+			!this.isSoundEnabled ||
+			this.isProcessing ||
+			this.lastContextTimestamp === null
+		) {
+			return;
+		}
+
+		for (const milestone of CACHE_SOUND_MILESTONES) {
+			if (
+				elapsedMs >= milestone.elapsedMs &&
+				!this.firedMilestones.has(milestone.id)
+			) {
+				this.firedMilestones.add(milestone.id);
+				this.playMilestoneSound(milestone.soundFile, milestone.repeat);
+			}
+		}
+	}
+
+	public playMilestoneSound(filename: string, repeat: number = 1): void {
+		if (!this.isSoundEnabled) return;
+		const resolvedPath = resolveSoundPath(filename);
+		if (!resolvedPath) return;
+		try {
+			this.soundPlayer(resolvedPath, repeat);
+		} catch {
+			/* best-effort sound notification */
+		}
 	}
 
 	public getLastContextTimestamp(): number | null {
@@ -327,8 +584,12 @@ export class CacheTimerController {
 	}
 
 	public setLastContextTimestamp(ts: number | null): void {
-		this.lastContextTimestamp =
+		const valid =
 			typeof ts === "number" && Number.isFinite(ts) && ts > 0 ? ts : null;
+		if (this.lastContextTimestamp !== valid) {
+			this.lastContextTimestamp = valid;
+			this.resetMilestones();
+		}
 	}
 
 	public isWidgetVisible(): boolean {
@@ -363,6 +624,7 @@ export class CacheTimerController {
 			lastContextTimestamp: this.lastContextTimestamp,
 			isProcessing: this.isProcessing,
 			isVisible: this.isVisible,
+			isSoundEnabled: this.isSoundEnabled,
 			elapsedMs,
 			ratio,
 			isExpired: elapsedMs >= this.ttlMs,
@@ -371,16 +633,19 @@ export class CacheTimerController {
 	}
 
 	public getStatusSummary(): string {
+		const soundText = this.isSoundEnabled
+			? "Sesli uyarı: açık (3dk, 4dk, 4.30dk)"
+			: "Sesli uyarı: kapalı";
 		if (this.lastContextTimestamp === null) {
-			return "Önbellek: Henüz istek gönderilmedi (yeni oturum).";
+			return `Önbellek: Henüz istek gönderilmedi (yeni oturum). ${soundText}.`;
 		}
 		const elapsedMs = Math.max(0, Date.now() - this.lastContextTimestamp);
 		const elapsedText = formatCacheElapsed(elapsedMs);
 		const remainingText = formatCacheRemaining(elapsedMs, this.ttlMs);
 		if (elapsedMs >= this.ttlMs) {
-			return `Önbellek: 5dk+ doldu (${elapsedText} geçti). Cache miss riski yüksek.`;
+			return `Önbellek: 5dk+ doldu (${elapsedText} geçti). Cache miss riski yüksek. ${soundText}.`;
 		}
-		return `Önbellek: ${elapsedText} / 5dk geçti (kalan: ${remainingText}). Cache hit aktif.`;
+		return `Önbellek: ${elapsedText} / 5dk geçti (kalan: ${remainingText}). Cache hit aktif. ${soundText}.`;
 	}
 
 	public paintFor(theme?: Theme): CacheTimerPaint {
@@ -455,6 +720,7 @@ export class CacheTimerController {
 
 	public startLoop(ctx: UiCtx): void {
 		this.lastCtx = ctx;
+		this.consecutiveWidgetErrors = 0;
 		if (this.timer !== null) return;
 		this.timer = setInterval(() => this.repaint(ctx), 1000);
 		this.timer.unref?.();
@@ -471,6 +737,19 @@ export class CacheTimerController {
 		this.lastCtx = ctx;
 		if (!ctx.hasUI || !ctx.ui?.setWidget) return;
 
+		const elapsedMs =
+			this.lastContextTimestamp === null
+				? 0
+				: Math.max(0, Date.now() - this.lastContextTimestamp);
+
+		// Sound milestones must fire even if widget rendering fails below:
+		// a broken widget frame must never silence the audio warnings.
+		try {
+			this.checkSoundMilestones(elapsedMs);
+		} catch {
+			/* best-effort sound notification */
+		}
+
 		try {
 			// If explicitly toggled off or no context yet, hide widget
 			if (
@@ -478,15 +757,12 @@ export class CacheTimerController {
 				(this.lastContextTimestamp === null && !this.isProcessing)
 			) {
 				ctx.ui.setWidget("cache-timer", undefined, { placement: "belowEditor" });
+				this.consecutiveWidgetErrors = 0;
 				return;
 			}
 
 			const theme = ctx.ui.theme;
 			const paint = this.paintFor(theme);
-			const elapsedMs =
-				this.lastContextTimestamp === null
-					? 0
-					: Math.max(0, Date.now() - this.lastContextTimestamp);
 			const columns =
 				process.stdout?.columns && process.stdout.columns > 0
 					? process.stdout.columns
@@ -509,8 +785,15 @@ export class CacheTimerController {
 			}
 
 			ctx.ui.setWidget("cache-timer", [line], { placement: "belowEditor" });
+			this.consecutiveWidgetErrors = 0;
 		} catch {
-			this.stopLoop();
+			// Tolerate transient UI errors (teardown races): stop the loop only
+			// after repeated consecutive failures. Every agent lifecycle event
+			// restarts it via startLoop, so recovery is automatic.
+			this.consecutiveWidgetErrors++;
+			if (this.consecutiveWidgetErrors >= MAX_CONSECUTIVE_WIDGET_ERRORS) {
+				this.stopLoop();
+			}
 		}
 	}
 
@@ -545,6 +828,7 @@ export class CacheTimerController {
 		this.lastContextTimestamp = foundTimestamp;
 
 		if (this.lastContextTimestamp === null) {
+			this.resetMilestones();
 			this.stopLoop();
 			if (ctx.hasUI && ctx.ui?.setWidget) {
 				try {
@@ -554,6 +838,8 @@ export class CacheTimerController {
 				}
 			}
 		} else {
+			const initialElapsed = Math.max(0, Date.now() - this.lastContextTimestamp);
+			this.seedMilestones(initialElapsed);
 			this.startLoop(ctx);
 			this.repaint(ctx);
 		}
@@ -562,6 +848,7 @@ export class CacheTimerController {
 	public handleAgentStart(ctx: UiCtx): void {
 		this.lastCtx = ctx;
 		this.isProcessing = true;
+		this.resetMilestones();
 		this.startLoop(ctx);
 		this.repaint(ctx);
 	}
@@ -570,18 +857,21 @@ export class CacheTimerController {
 		this.lastCtx = ctx;
 		this.lastContextTimestamp = Date.now();
 		this.isProcessing = true;
+		this.resetMilestones();
 		this.repaint(ctx);
 	}
 
 	public handleMessageEnd(event: MessageEndEvent, ctx: UiCtx): void {
 		if (event?.message?.role === "assistant") {
 			this.lastContextTimestamp = Date.now();
+			this.resetMilestones();
 		}
 		this.lastCtx = ctx;
 	}
 
 	public handleTurnEnd(_event: TurnEndEvent, ctx: UiCtx): void {
 		this.lastContextTimestamp = Date.now();
+		this.resetMilestones();
 		this.lastCtx = ctx;
 	}
 
@@ -589,6 +879,7 @@ export class CacheTimerController {
 		this.lastCtx = ctx;
 		this.isProcessing = false;
 		this.lastContextTimestamp = Date.now();
+		this.resetMilestones();
 		this.startLoop(ctx);
 		this.repaint(ctx);
 	}
@@ -649,12 +940,47 @@ export function registerCacheTimer(pi: ExtensionAPI): CacheTimerController {
 	// Register /cache slash command for interactive queries & toggling
 	pi.registerCommand("cache", {
 		description:
-			"Prompt cache TTL sayacını kontrol eder (/cache toggle ile açıp kapatır)",
+			"Prompt cache TTL sayacını ve sesli uyarıları kontrol eder (/cache toggle, /cache sound, /cache sound test)",
 		handler: async (args, ctx) => {
 			const clean = sanitizeControlChars(stripAnsi(args)).trim().toLowerCase();
 			if (clean === "toggle") {
 				const visible = controller.toggleVisibility(ctx);
 				ctx.ui.notify(`Önbellek sayacı: ${visible ? "açık" : "kapalı"}`, "info");
+				return;
+			}
+			if (
+				clean === "sound" ||
+				clean === "ses" ||
+				clean === "sound toggle" ||
+				clean === "ses toggle"
+			) {
+				const enabled = controller.toggleSound();
+				ctx.ui.notify(
+					`Önbellek sesli uyarıları: ${enabled ? "açık" : "kapalı"}`,
+					"info",
+				);
+				return;
+			}
+			if (clean === "sound on" || clean === "ses aç") {
+				controller.setSoundEnabled(true);
+				ctx.ui.notify("Önbellek sesli uyarıları: açık", "info");
+				return;
+			}
+			if (clean === "sound off" || clean === "ses kapat") {
+				controller.setSoundEnabled(false);
+				ctx.ui.notify("Önbellek sesli uyarıları: kapalı", "info");
+				return;
+			}
+			if (
+				clean === "sound test" ||
+				clean === "ses test" ||
+				clean === "test sound"
+			) {
+				controller.playMilestoneSound("3.mp3", 1);
+				ctx.ui.notify(
+					"Ses testi: 3.mp3 çalınıyor. Ses gelmiyorsa oynatıcıyı (mpv/ffplay) ve ses çıkışını kontrol et.",
+					"info",
+				);
 				return;
 			}
 			ctx.ui.notify(controller.getStatusSummary(), "info");
