@@ -1,7 +1,7 @@
 {
   "name": "cc-ui",
   "version": "0.1.0",
-  "description": "Claude Code spinner, 5-minute prompt cache TTL counter with audio warnings, and compact tool renderers for Pi coding agent.",
+  "description": "Claude Code spinner with live token rate, 5-minute prompt cache TTL counter with audio warnings and git status, and compact tool renderers for Pi coding agent.",
   "type": "module",
   "keywords": ["pi-package"],
   "license": "MIT",
