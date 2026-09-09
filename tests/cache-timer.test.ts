@@ -1,0 +1,460 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import type { Theme } from "@earendil-works/pi-coding-agent";
+import {
+	buildCacheTimerLine,
+	type CacheTimerPaint,
+	CacheTimerController,
+	colorizeRgb,
+	DARK_CACHE_STOPS,
+	formatCacheElapsed,
+	formatCacheRemaining,
+	getCacheColor,
+	getCacheTtlRatio,
+	interpolateRgb,
+	LIGHT_CACHE_STOPS,
+	registerCacheTimer,
+	rgbToAnsi,
+	type UiCtx,
+} from "../cache-timer.ts";
+import { rgb, stripAnsi, visibleWidth } from "../palette.ts";
+
+function createMockPaint(scheme: "dark" | "light" = "dark"): CacheTimerPaint {
+	return {
+		colorize: (text, color) => colorizeRgb(text, color, "truecolor"),
+		dim: (text) => `\x1b[2m${text}\x1b[22m`,
+		accent: (text) => `\x1b[38;2;215;119;87m${text}\x1b[39m`,
+		red: (text) => `\x1b[38;2;255;107;128m${text}\x1b[39m`,
+		scheme,
+		colorMode: "truecolor",
+	};
+}
+
+describe("cache timer pure functions", () => {
+	describe("formatCacheElapsed", () => {
+		it("formats seconds correctly", () => {
+			assert.equal(formatCacheElapsed(0), "0sn");
+			assert.equal(formatCacheElapsed(1000), "1sn");
+			assert.equal(formatCacheElapsed(45_000), "45sn");
+			assert.equal(formatCacheElapsed(59_999), "59sn");
+		});
+
+		it("formats minutes and seconds correctly", () => {
+			assert.equal(formatCacheElapsed(60_000), "1dk 0sn");
+			assert.equal(formatCacheElapsed(75_000), "1dk 15sn");
+			assert.equal(formatCacheElapsed(240_000), "4dk 0sn");
+			assert.equal(formatCacheElapsed(299_000), "4dk 59sn");
+		});
+
+		it("formats hours, minutes, and seconds correctly", () => {
+			assert.equal(formatCacheElapsed(3600_000), "1sa 0dk 0sn");
+			assert.equal(formatCacheElapsed(3665_000), "1sa 1dk 5sn");
+		});
+
+		it("safely handles edge cases (negative, NaN, Infinity)", () => {
+			assert.equal(formatCacheElapsed(-500), "0sn");
+			assert.equal(formatCacheElapsed(NaN as any), "0sn");
+			assert.equal(formatCacheElapsed(Infinity as any), "0sn");
+		});
+	});
+
+	describe("formatCacheRemaining", () => {
+		it("formats remaining time until 5 minutes (300s)", () => {
+			assert.equal(formatCacheRemaining(0, 300_000), "5dk 0sn");
+			assert.equal(formatCacheRemaining(45_000, 300_000), "4dk 15sn");
+			assert.equal(formatCacheRemaining(120_000, 300_000), "3dk 0sn");
+			assert.equal(formatCacheRemaining(255_000, 300_000), "45sn");
+			assert.equal(formatCacheRemaining(299_000, 300_000), "1sn");
+		});
+
+		it("clamps to 0sn when expired", () => {
+			assert.equal(formatCacheRemaining(300_000, 300_000), "0sn");
+			assert.equal(formatCacheRemaining(350_000, 300_000), "0sn");
+		});
+
+		it("safely handles edge cases", () => {
+			assert.equal(formatCacheRemaining(-1000, 300_000), "5dk 0sn");
+			assert.equal(formatCacheRemaining(NaN as any, 300_000), "5dk 0sn");
+		});
+	});
+
+	describe("getCacheTtlRatio", () => {
+		it("computes ratio from 0.0 to 1.0", () => {
+			assert.equal(getCacheTtlRatio(0, 300_000), 0);
+			assert.equal(getCacheTtlRatio(150_000, 300_000), 0.5);
+			assert.equal(getCacheTtlRatio(300_000, 300_000), 1.0);
+		});
+
+		it("clamps values exceeding TTL to 1.0", () => {
+			assert.equal(getCacheTtlRatio(400_000, 300_000), 1.0);
+		});
+
+		it("clamps negative values to 0.0", () => {
+			assert.equal(getCacheTtlRatio(-5000, 300_000), 0.0);
+			assert.equal(getCacheTtlRatio(NaN as any, 300_000), 0.0);
+		});
+	});
+
+	describe("interpolateRgb & getCacheColor", () => {
+		it("interpolates between two colors accurately", () => {
+			const c1 = rgb(0, 100, 200);
+			const c2 = rgb(100, 200, 0);
+			const mid = interpolateRgb(c1, c2, 0.5);
+			assert.equal(mid.r, 50);
+			assert.equal(mid.g, 150);
+			assert.equal(mid.b, 100);
+		});
+
+		it("returns fresh green at ratio 0.0 for dark scheme", () => {
+			const col = getCacheColor(0.0, "dark");
+			assert.equal(col.r, DARK_CACHE_STOPS[0]!.r);
+			assert.equal(col.g, DARK_CACHE_STOPS[0]!.g);
+			assert.equal(col.b, DARK_CACHE_STOPS[0]!.b);
+		});
+
+		it("transitions to amber yellow at ratio 0.60 (3 minutes)", () => {
+			const col = getCacheColor(0.6, "dark");
+			assert.equal(col.r, 255);
+			assert.equal(col.g, 193);
+			assert.equal(col.b, 7);
+		});
+
+		it("transitions towards red and darkens into deep crimson red at 5 minutes", () => {
+			const nearEnd = getCacheColor(0.92, "dark"); // 4m 36s - bright danger red
+			assert.equal(nearEnd.r, 235);
+			assert.equal(nearEnd.g, 50);
+			assert.equal(nearEnd.b, 50);
+
+			const at5min = getCacheColor(1.0, "dark"); // 5m - deep dark crimson red
+			assert.equal(at5min.r, 140);
+			assert.equal(at5min.g, 18);
+			assert.equal(at5min.b, 18);
+
+			// Verifies user requirement: "5 dakikaya yaklaştıkça rengi koyulaşsın kırmızıya doğru"
+			// Red luminance drops from 235 to 140, producing a darker, deeper red.
+			assert.ok(at5min.r < nearEnd.r, "red value darkens as 5 minutes approaches");
+		});
+
+		it("handles light scheme colors", () => {
+			const lightStart = getCacheColor(0.0, "light");
+			assert.equal(lightStart.r, LIGHT_CACHE_STOPS[0]!.r);
+			const lightEnd = getCacheColor(1.0, "light");
+			assert.equal(lightEnd.r, LIGHT_CACHE_STOPS[LIGHT_CACHE_STOPS.length - 1]!.r);
+		});
+	});
+
+	describe("rgbToAnsi & colorizeRgb", () => {
+		it("generates 24-bit truecolor escape sequence", () => {
+			const seq = rgbToAnsi(78, 186, 101, "truecolor");
+			assert.equal(seq, "\x1b[38;2;78;186;101m");
+		});
+
+		it("generates 256color escape sequence", () => {
+			const seq = rgbToAnsi(255, 0, 0, "256color");
+			assert.ok(seq.startsWith("\x1b[38;5;"));
+		});
+
+		it("colorizes text and terminates with reset", () => {
+			const text = colorizeRgb("test", rgb(255, 0, 0), "truecolor");
+			assert.equal(text, "\x1b[38;2;255;0;0mtest\x1b[39m");
+		});
+	});
+});
+
+describe("buildCacheTimerLine", () => {
+	const paint = createMockPaint("dark");
+
+	it("returns empty string when hasContext is false", () => {
+		const line = buildCacheTimerLine(
+			{
+				elapsedMs: 0,
+				ttlMs: 300_000,
+				columns: 80,
+				hasContext: false,
+				isProcessing: false,
+			},
+			paint,
+		);
+		assert.equal(line, "");
+	});
+
+	it("renders 0sn / 5dk right-aligned during in-progress LLM turn", () => {
+		const line = buildCacheTimerLine(
+			{
+				elapsedMs: 5000,
+				ttlMs: 300_000,
+				columns: 80,
+				hasContext: true,
+				isProcessing: true,
+			},
+			paint,
+		);
+		const plain = stripAnsi(line);
+		assert.ok(plain.endsWith("0sn / 5dk"));
+		assert.ok(plain.startsWith(" "));
+		assert.equal(visibleWidth(plain), 78);
+	});
+
+	it("renders right-aligned active cache status (36sn / 5dk)", () => {
+		const line = buildCacheTimerLine(
+			{
+				elapsedMs: 36_000,
+				ttlMs: 300_000,
+				columns: 80,
+				hasContext: true,
+				isProcessing: false,
+			},
+			paint,
+		);
+		const plain = stripAnsi(line);
+		assert.ok(plain.endsWith("36sn / 5dk"));
+		assert.ok(plain.startsWith(" "));
+		assert.equal(visibleWidth(plain), 78);
+	});
+
+	it("renders minutes and seconds accurately (1dk 15sn / 5dk)", () => {
+		const line = buildCacheTimerLine(
+			{
+				elapsedMs: 75_000,
+				ttlMs: 300_000,
+				columns: 80,
+				hasContext: true,
+				isProcessing: false,
+			},
+			paint,
+		);
+		const plain = stripAnsi(line);
+		assert.ok(plain.endsWith("1dk 15sn / 5dk"));
+		assert.equal(visibleWidth(plain), 78);
+	});
+
+	it("renders expired status (5dk 20sn / 5dk) right-aligned", () => {
+		const line = buildCacheTimerLine(
+			{
+				elapsedMs: 320_000, // 5m 20s
+				ttlMs: 300_000,
+				columns: 80,
+				hasContext: true,
+				isProcessing: false,
+			},
+			paint,
+		);
+		const plain = stripAnsi(line);
+		assert.ok(plain.endsWith("5dk 20sn / 5dk"));
+		assert.equal(visibleWidth(plain), 78);
+	});
+
+	it("progressively collapses layout on narrow viewports without exceeding width", () => {
+		const widths = [120, 80, 60, 45, 30, 20, 10, 5, 2, 1];
+		for (const cols of widths) {
+			const line = buildCacheTimerLine(
+				{
+					elapsedMs: 75_000,
+					ttlMs: 300_000,
+					columns: cols,
+					hasContext: true,
+					isProcessing: false,
+				},
+				paint,
+			);
+			const visW = visibleWidth(line);
+			// Text component in Pi applies paddingX: 1 (max content width = cols - 2)
+			const maxAllowed = Math.max(1, cols - 2);
+			assert.ok(
+				visW <= maxAllowed,
+				`visible width ${visW} exceeds max allowed ${maxAllowed} at cols=${cols}`,
+			);
+		}
+	});
+});
+
+describe("CacheTimerController lifecycle", () => {
+	function createMockUi(): {
+		ctx: UiCtx;
+		widgets: Map<string, { content?: string[]; placement?: string }>;
+		notified: string[];
+	} {
+		const widgets = new Map<string, { content?: string[]; placement?: string }>();
+		const notified: string[] = [];
+		const mockTheme = {
+			name: "claude-code-dark",
+			fg: (_token: string, text: string) => text,
+			bg: (_token: string, text: string) => text,
+			bold: (text: string) => text,
+		} as unknown as Theme;
+
+		const ctx = {
+			hasUI: true,
+			ui: {
+				theme: mockTheme,
+				setWidget: (key: string, content?: string[], opts?: any) => {
+					if (content === undefined) {
+						widgets.delete(key);
+					} else {
+						widgets.set(key, { content, placement: opts?.placement });
+					}
+				},
+				notify: (msg: string) => {
+					notified.push(msg);
+				},
+			},
+		} as unknown as UiCtx;
+
+		return {
+			ctx,
+			widgets,
+			notified,
+		};
+	}
+
+	it("initializes without active widget on a brand new session", () => {
+		const controller = new CacheTimerController();
+		const mock = createMockUi();
+		controller.handleSessionStart({
+			...mock.ctx,
+			sessionManager: { getEntries: () => [] },
+		});
+
+		assert.equal(controller.getLastContextTimestamp(), null);
+		assert.equal(mock.widgets.has("cache-timer"), false);
+		controller.dispose();
+	});
+
+	it("seeds lastContextTimestamp from existing session history on resume", () => {
+		const controller = new CacheTimerController();
+		const mock = createMockUi();
+		const sampleTime = "2026-09-01T12:00:00.000Z";
+		const entries = [
+			{ type: "session", timestamp: "2026-09-01T11:59:00.000Z" },
+			{ type: "message", timestamp: sampleTime },
+		];
+		controller.handleSessionStart({
+			...mock.ctx,
+			sessionManager: { getEntries: () => entries },
+		});
+
+		assert.equal(controller.getLastContextTimestamp(), Date.parse(sampleTime));
+		assert.equal(mock.widgets.has("cache-timer"), true);
+		const widget = mock.widgets.get("cache-timer");
+		assert.equal(widget?.placement, "belowEditor");
+		controller.dispose();
+	});
+
+	it("handles agent_start -> before_provider_request -> message_end -> agent_settled lifecycle", () => {
+		const controller = new CacheTimerController();
+		const mock = createMockUi();
+
+		controller.handleSessionStart({
+			...mock.ctx,
+			sessionManager: { getEntries: () => [] },
+		});
+		assert.equal(mock.widgets.has("cache-timer"), false);
+
+		// Agent starts
+		controller.handleAgentStart(mock.ctx);
+		assert.equal(controller.getState().isProcessing, true);
+		assert.equal(mock.widgets.has("cache-timer"), true);
+		const processingLine = stripAnsi(
+			mock.widgets.get("cache-timer")!.content![0]!,
+		);
+		assert.ok(processingLine.endsWith("0sn / 5dk"));
+
+		// Provider request
+		controller.handleBeforeProviderRequest(mock.ctx);
+		const t1 = controller.getLastContextTimestamp();
+		assert.ok(typeof t1 === "number" && t1 > 0);
+
+		// Assistant message end
+		controller.handleMessageEnd(
+			{
+				type: "message_end",
+				message: { role: "assistant" } as any,
+			},
+			mock.ctx,
+		);
+
+		// Agent settled
+		controller.handleAgentSettled(mock.ctx);
+		assert.equal(controller.getState().isProcessing, false);
+		const settledLine = stripAnsi(mock.widgets.get("cache-timer")!.content![0]!);
+		assert.ok(settledLine.endsWith("0sn / 5dk"));
+
+		controller.dispose();
+	});
+
+	it("supports toggleVisibility and slash command toggling", () => {
+		const controller = new CacheTimerController();
+		const mock = createMockUi();
+		controller.handleSessionStart({
+			...mock.ctx,
+			sessionManager: {
+				getEntries: () => [
+					{ type: "message", timestamp: new Date().toISOString() },
+				],
+			},
+		});
+
+		assert.equal(mock.widgets.has("cache-timer"), true);
+
+		// Toggle off
+		const visible1 = controller.toggleVisibility(mock.ctx);
+		assert.equal(visible1, false);
+		assert.equal(mock.widgets.has("cache-timer"), false);
+
+		// Toggle on
+		const visible2 = controller.toggleVisibility(mock.ctx);
+		assert.equal(visible2, true);
+		assert.equal(mock.widgets.has("cache-timer"), true);
+
+		controller.dispose();
+	});
+
+	it("cleans up timers and widgets cleanly on session_shutdown and dispose", () => {
+		const controller = new CacheTimerController();
+		const mock = createMockUi();
+		controller.handleSessionStart({
+			...mock.ctx,
+			sessionManager: {
+				getEntries: () => [
+					{ type: "message", timestamp: new Date().toISOString() },
+				],
+			},
+		});
+
+		assert.equal(controller.getState().hasTimer, true);
+		controller.handleSessionShutdown(mock.ctx);
+		assert.equal(controller.getState().hasTimer, false);
+		assert.equal(mock.widgets.has("cache-timer"), false);
+
+		controller.dispose();
+		assert.equal(controller.getState().hasTimer, false);
+	});
+
+	it("registers handlers and slash command with pi ExtensionAPI", () => {
+		const handlers = new Map<string, any[]>();
+		const commands = new Map<string, any>();
+		const mockPi = {
+			on: (event: string, handler: any) => {
+				const list = handlers.get(event) ?? [];
+				list.push(handler);
+				handlers.set(event, list);
+			},
+			registerCommand: (name: string, opts: any) => {
+				commands.set(name, opts);
+			},
+		};
+
+		const controller = registerCacheTimer(mockPi as any);
+		assert.ok(controller instanceof CacheTimerController);
+		assert.ok(handlers.has("session_start"));
+		assert.ok(handlers.has("agent_start"));
+		assert.ok(handlers.has("before_provider_request"));
+		assert.ok(handlers.has("message_end"));
+		assert.ok(handlers.has("turn_end"));
+		assert.ok(handlers.has("agent_settled"));
+		assert.ok(handlers.has("session_shutdown"));
+		assert.ok(commands.has("cache"));
+
+		controller.dispose();
+	});
+});

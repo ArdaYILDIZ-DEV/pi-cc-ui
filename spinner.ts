@@ -1,0 +1,792 @@
+/**
+ * CC spinner status row, reproduced on pi's public APIs.
+ *
+ * CC's SpinnerAnimationRow (SpinnerAnimationRow.tsx) is a 20fps self-drawn row:
+ * useAnimationFrame(50) drives the glyph frame (120ms), a glimmer sweep, the
+ * elapsed-time + token byline (after 30s), and a thinking append. pi's built-in
+ * Loader can do none of that — it bakes the glyph color once at
+ * setWorkingIndicator time (AUDIT §5 spinner.ts:74 burn-in) and forces the verb
+ * through messageColorFn = theme.fg("muted") (AUDIT §6: the verb should be
+ * claude brand orange, not muted gray).
+ *
+ * So we do what the audit's feasibility note prescribes: hide the built-in
+ * indicator with `frames: []` (pi loader.js:44,51 — empty frames ⇒ no glyph and
+ * no internal timer) and repaint the whole line ourselves on a 50ms interval via
+ * setWorkingMessage (pi interactive-mode.js:1878-1883 → StatusIndicator.setMessage
+ * → Loader.updateDisplay → ui.requestRender, loader.js:38-41,59-67). Because the
+ * line is rebuilt each tick from the live theme, a mid-session theme switch is
+ * picked up immediately (no burn-in) and we own every color span.
+ */
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+	MessageEndEvent,
+	MessageUpdateEvent,
+	Theme,
+	ThemeColor,
+} from "@earendil-works/pi-coding-agent";
+import {
+	fg as paletteFg,
+	resolvePalette,
+	visibleWidth,
+	sanitizeControlChars,
+	sanitizeSafeAnsi,
+	sanitizeTitle,
+	stripAnsi,
+} from "./palette.ts";
+
+// CC Spinner/utils.ts getDefaultCharacters(): Ghostty renders ✽ slightly offset,
+// so the last frame is * there.
+function defaultCharacters(): readonly string[] {
+	if (process.env.TERM === "xterm-ghostty") return ["·", "✢", "✳", "✶", "✻", "*"];
+	return ["·", "✢", "✳", "✶", "✻", "✽"];
+}
+
+const FRAMES: readonly string[] = defaultCharacters();
+// Forward then reverse — CC's SpinnerAnimationRow plays the loop ping-pong.
+const SPINNER: readonly string[] = [...FRAMES, ...[...FRAMES].reverse()];
+// CC SpinnerAnimationRow.tsx:133 — frame = Math.floor(time / 120).
+const FRAME_MS = 120;
+// CC useAnimationFrame(50): the whole row is repainted at 20fps.
+const TICK_MS = 50;
+// CC SpinnerAnimationRow.tsx:135 — non-requesting glimmer cadence.
+const GLIMMER_MS = 200;
+
+// Türkçe doğal, akıcı ve tek kelimelik eylem fiilleri
+const VERBS = [
+	"Aktarılıyor", "Algılanıyor", "Araştırılıyor", "Arındırılıyor", "Aydınlatılıyor",
+	"Ayıklanıyor", "Ayrıştırılıyor", "Bağlanıyor", "Biçimlendiriliyor", "Birleştiriliyor",
+	"Bölümleniyor", "Bütünleştiriliyor", "Çözümleniyor", "Değerlendiriliyor", "Dengeleniyor",
+	"Denetleniyor", "Deneniyor", "Derinleştiriliyor", "Derleniyor", "Detaylandırılıyor",
+	"Diziliyor", "Doğrulanıyor", "Dönüştürülüyor", "Düzeltiliyor", "Düzenleniyor",
+	"Düşünülüyor", "Eleniyor", "Eşleştiriliyor", "Filtreleniyor", "Geliştiriliyor",
+	"Genişletiliyor", "Gruplanıyor", "Güçlendiriliyor", "Güncelleniyor", "Harmanlanıyor",
+	"Hazırlanıyor", "Hesaplanıyor", "Hizalanıyor", "İlerletiliyor", "İnceleniyor",
+	"İndirgeniyor", "İşleniyor", "İyileştiriliyor", "İzleniyor", "Kavranıyor",
+	"Kaynaştırılıyor", "Keşfediliyor", "Kodlanıyor", "Konumlandırılıyor", "Kurgulanıyor",
+	"Modelleniyor", "Netleştiriliyor", "Odaklanılıyor", "Oluşturuluyor", "Onarılıyor",
+	"Ölçülüyor", "Öngörülüyor", "Özetleniyor", "Paketleniyor", "Planlanıyor",
+	"Programlanıyor", "Rötuşlanıyor", "Sabitleniyor", "Saflaştırılıyor", "Sarmalanıyor",
+	"Seçiliyor", "Sentezleniyor", "Sıralanıyor", "Sınanıyor", "Sorgulanıyor",
+	"Soyutlanıyor", "Süzülüyor", "Şekillendiriliyor", "Tamamlanıyor", "Taranıyor",
+	"Tasarlanıyor", "Tartılıyor", "Tazeleniyor", "Temizleniyor", "Toparlanıyor",
+	"Türetiliyor", "Uyarlanıyor", "Uyumlanıyor", "Üretiliyor", "Vurgulanıyor",
+	"Yapılandırılıyor", "Yenileniyor", "Yerleştiriliyor", "Yorumlanıyor", "Yürütülüyor",
+	"Zenginleştiriliyor",
+] as const;
+
+export function sampleVerb(): string {
+	return VERBS[Math.floor(Math.random() * VERBS.length)] ?? "İşleniyor";
+}
+
+let activeWorkingVerb: string = sampleVerb();
+
+/** The active turn's spinner verb (for other modules restoring the working message). */
+export function currentWorkingVerb(): string {
+	return activeWorkingVerb;
+}
+
+// ---------------------------------------------------------------------------
+// Pure frame builder (tested in isolation)
+// ---------------------------------------------------------------------------
+
+/** Color functions for one frame — resolved from the *live* theme each tick. */
+export interface SpinnerPaint {
+	/** claude brand orange (CC messageColor 'claude'). */
+	readonly accent: (s: string) => string;
+	/** claude shimmer (CC shimmerColor 'claudeShimmer'). */
+	readonly shimmer: (s: string) => string;
+	/** CC's dimColor. */
+	readonly dim: (s: string) => string;
+	/** Optional theme/scheme-aware thinking glow function. */
+	readonly thinking?: (s: string, timeMs: number) => string;
+}
+
+/** CC Spinner.tsx:125 — "thinking" while a block is open, then the finished
+ *  block's duration in ms (shown as `thought for Ns` for 2s), then null. */
+export type ThinkingStatus = "thinking" | number | null;
+
+export interface SpinnerFrameState {
+	readonly verb: string;
+	/** Milliseconds since the request (agent loop) started. */
+	readonly timeMs: number;
+	readonly columns: number;
+	/** Cumulative downstream (output) tokens this request; segment hidden when 0/undefined. */
+	readonly tokens?: number;
+	/** CC thinkingStatus (Spinner.tsx:125). */
+	readonly thinkingStatus?: ThinkingStatus;
+	/** CC getEffortSuffix (effort.ts:188): ` with high effort`, "" when unset. */
+	readonly effortSuffix?: string;
+	/** How long the current thinking block has been open — drives the
+	 *  "almost done thinking" wording on long thinks. */
+	readonly thinkingElapsedMs?: number;
+}
+
+/** CC-style compact token count: 847 → "847", 1234 → "1.2k", 25600 → "26k", 1500000 -> "1.5M". */
+export function formatTokenCount(n: number): string {
+	const safe = typeof n === "number" && Number.isFinite(n) && !Number.isNaN(n) && n >= 0 ? Math.floor(n) : 0;
+	if (safe < 1000) return String(safe);
+	if (safe < 10_000) {
+		const thousands = Math.floor(safe / 1000);
+		const tenths = Math.round((safe % 1000) / 100);
+		if (tenths === 0) return `${thousands}k`;
+		if (tenths === 10) return `${thousands + 1}k`;
+		return `${thousands}.${tenths}k`;
+	}
+	if (safe < 1_000_000) return `${Math.round(safe / 1000)}k`;
+	const millions = Math.floor(safe / 1_000_000);
+	const tenths = Math.round((safe % 1_000_000) / 100_000);
+	if (tenths === 0) return `${millions}M`;
+	if (tenths === 10) return `${millions + 1}M`;
+	return `${millions}.${tenths}M`;
+}
+
+/** Elapsed time for the spinner byline: 12sn / 1dk 5sn / 1sa 2dk 3sn. */
+export function formatElapsed(ms: number): string {
+	const safe = typeof ms === "number" && Number.isFinite(ms) && !Number.isNaN(ms) && ms >= 0 ? Math.floor(ms) : 0;
+	const total = Math.floor(safe / 1000);
+	const h = Math.floor(total / 3600);
+	const m = Math.floor((total % 3600) / 60);
+	const s = total % 60;
+	if (h > 0) return `${h}sa ${m}dk ${s}sn`;
+	if (m > 0) return `${m}dk ${s}sn`;
+	return `${s}sn`;
+}
+
+/**
+ * The glimmer-swept verb. CC GlimmerMessage.tsx:103-141 — chars within ±1 of
+ * `glimmerIndex` (a visual column that sweeps right→left) get the shimmer color,
+ * the rest get the base (accent) color. When the sweep is offscreen the whole
+ * message renders in the base color.
+ */
+export function glimmerMessage(message: string, glimmerIndex: number, paint: SpinnerPaint): string {
+	if (!message || typeof message !== "string") return "";
+	if (!Number.isFinite(glimmerIndex) || Number.isNaN(glimmerIndex)) return paint.accent(message);
+
+	const shimmerStart = glimmerIndex - 1;
+	const shimmerEnd = glimmerIndex + 1;
+	if (shimmerEnd < 0) return paint.accent(message);
+
+	// Fast path for strings without astral/surrogate characters (standard BMP including Turkish & punctuation)
+	let hasSurrogates = false;
+	for (let i = 0; i < message.length; i++) {
+		const code = message.charCodeAt(i);
+		if (code >= 0xd800 && code <= 0xdbff) {
+			hasSurrogates = true;
+			break;
+		}
+	}
+
+	if (!hasSurrogates) {
+		const len = message.length;
+		if (shimmerStart >= len) return paint.accent(message);
+		const start = Math.max(0, shimmerStart);
+		const end = Math.min(len - 1, shimmerEnd);
+		const before = start > 0 ? message.slice(0, start) : "";
+		const shim = message.slice(start, end + 1);
+		const after = end + 1 < len ? message.slice(end + 1) : "";
+		return (
+			(before ? paint.accent(before) : "") +
+			(shim ? paint.shimmer(shim) : "") +
+			(after ? paint.accent(after) : "")
+		);
+	}
+
+	const chars = Array.from(message);
+	const messageWidth = chars.length;
+	if (shimmerStart >= messageWidth) return paint.accent(message);
+
+	const start = Math.max(0, shimmerStart);
+	const end = Math.min(messageWidth - 1, shimmerEnd);
+	const before = start > 0 ? chars.slice(0, start).join("") : "";
+	const shim = chars.slice(start, end + 1).join("");
+	const after = end + 1 < messageWidth ? chars.slice(end + 1).join("") : "";
+
+	return (before ? paint.accent(before) : "") + (shim ? paint.shimmer(shim) : "") + (after ? paint.accent(after) : "");
+}
+
+// CC SpinnerAnimationRow.tsx:24-35 — the in-progress thinking segment breathes
+// between two fixed grays (theme-independent in CC as well): 3s delay, then a
+// 2s sine period. The past-tense `thought for Ns` renders plain dim.
+const THINKING_INACTIVE_GRAY = 153;
+const THINKING_SHIMMER_GRAY = 185;
+const THINKING_DELAY_MS = 3000;
+const THINKING_GLOW_PERIOD_S = 2;
+
+// Precomputed truecolor gray escapes (0-255)
+const RGB_GRAY_ANSI: readonly string[] = Array.from({ length: 256 }, (_, v) => `\x1b[38;2;${v};${v};${v}m`);
+
+export function thinkingGlowPaint(timeMs: number, scheme: "dark" | "light" = "dark"): (s: string) => string {
+	const safeMs = Math.max(0, Number.isFinite(timeMs) ? timeMs : 0);
+	const opacity =
+		safeMs < THINKING_DELAY_MS
+			? 0
+			: (Math.sin((((safeMs - THINKING_DELAY_MS) / 1000) * (Math.PI * 2)) / THINKING_GLOW_PERIOD_S) + 1) / 2;
+	let v: number;
+	if (scheme === "light") {
+		v = Math.round(105 - (105 - 65) * opacity);
+	} else {
+		v = Math.round(THINKING_INACTIVE_GRAY + (THINKING_SHIMMER_GRAY - THINKING_INACTIVE_GRAY) * opacity);
+	}
+	const ansiPrefix = RGB_GRAY_ANSI[v] ?? `\x1b[38;2;${v};${v};${v}m`;
+	return (s) => `${ansiPrefix}${s}\x1b[39m`;
+}
+
+/**
+ * In-progress thinking wording. CC v2.1.234 escalates the copy as one thinking
+ * block keeps running: `thinking` → `thinking more` → `thinking some more` →
+ * `almost done thinking` (user-observed; the local CC snapshot predates this,
+ * so the thresholds are a best-guess time ladder — CC likely keys off the
+ * thinking-token budget, which pi does not expose).
+ */
+export function thinkingWording(blockElapsedMs: number): string {
+	const safe = typeof blockElapsedMs === "number" && Number.isFinite(blockElapsedMs) ? Math.max(0, blockElapsedMs) : 0;
+	if (safe >= 120_000) return "düşünme tamamlanmak üzere";
+	if (safe >= 60_000) return "biraz daha düşünülüyor";
+	if (safe >= 30_000) return "derinlemesine düşünülüyor";
+	return "düşünülüyor";
+}
+
+/**
+ * Build one spinner line: `<glyph> <verb…> (12s · ↓ 1.2k tokens · thinking
+ * with high effort)`. Pure — takes the animation clock and color functions,
+ * returns an ANSI string. Mirrors SpinnerAnimationRow's derivations for a
+ * single (non-teammate) agent. Glyph and verb are painted in the accent
+ * (claude brand) color every tick — no gray verb (AUDIT §6), no baked-in frame
+ * color (AUDIT §5 spinner.ts:74) — with a glimmer sweep across the verb
+ * (AUDIT §6, CC's most recognizable spinner effect).
+ *
+ * Width gating progressively degrades:
+ * Full: [Glyph] [Verb] (Timer · Tokens · Thinking)
+ * Medium: [Glyph] [Verb] (Timer · Thinking) or (Timer · Tokens)
+ * Narrow: [Glyph] [Verb] (Timer) or (Thinking)
+ * Compact: [Glyph] [Verb]
+ * Ultra-narrow: [Glyph] [Truncated verb]… (never exceeds columns or breaks line wrap).
+ */
+export function buildSpinnerLine(state: SpinnerFrameState, paint: SpinnerPaint): string {
+	let cleanVerb = typeof state?.verb === "string" ? state.verb : "";
+	if (cleanVerb) {
+		if (
+			cleanVerb.includes("\x1b") ||
+			cleanVerb.includes("\x9b") ||
+			cleanVerb.includes("\x9d") ||
+			cleanVerb.includes("\x90")
+		) {
+			cleanVerb = stripAnsi(cleanVerb);
+		}
+		// Fast check for control characters
+		let hasControl = false;
+		for (let i = 0; i < cleanVerb.length; i++) {
+			const code = cleanVerb.charCodeAt(i);
+			if (code < 32 || (code >= 127 && code <= 159)) {
+				hasControl = true;
+				break;
+			}
+		}
+		if (hasControl) {
+			cleanVerb = sanitizeControlChars(cleanVerb);
+		}
+		cleanVerb = cleanVerb.trim();
+	}
+	const rawVerb = cleanVerb || "İşleniyor";
+	const timeMs =
+		typeof state?.timeMs === "number" && Number.isFinite(state.timeMs) && state.timeMs >= 0
+			? Math.floor(state.timeMs)
+			: 0;
+	const frame = Math.floor(timeMs / FRAME_MS) % SPINNER.length;
+	const glyph = paint.accent(SPINNER[frame] ?? "✻");
+	const message = `${rawVerb}…`;
+	const messageWidth = visibleWidth(message);
+
+	const rawCols = typeof state?.columns === "number" && Number.isFinite(state.columns) ? state.columns : 80;
+	const cols = Math.max(0, Math.floor(rawCols));
+
+	// Progressive ultra-narrow viewport collapsing for constrained positive columns
+	if (cols === 1) return glyph;
+	if (cols === 2) return `${glyph} `;
+	if (cols === 3) return `${glyph} …`;
+
+	// Glimmer sweep cadence
+	const cycleLength = messageWidth + 20;
+	const cyclePosition = Math.floor(timeMs / GLIMMER_MS);
+	const glimmerIndex = messageWidth + 10 - (cyclePosition % cycleLength);
+
+	// Ultra-narrow: truncate verb stem to avoid terminal line wrapping when cols is bounded
+	if (cols > 0 && cols < 2 + messageWidth) {
+		const maxStemWidth = cols - 3;
+		const chars = Array.from(rawVerb);
+		const truncatedStem = chars.slice(0, Math.max(1, maxStemWidth)).join("");
+		const truncatedMessage = `${truncatedStem}…`;
+		const verbSpan = glimmerMessage(truncatedMessage, glimmerIndex, paint);
+		return `${glyph} ${verbSpan}`;
+	}
+
+	const verbSpan = glimmerMessage(message, glimmerIndex, paint);
+	const availableSpace = cols > 0 ? cols - (2 + messageWidth) : -1;
+
+	// Space below 4 cannot fit any byline (` (x)` requires min 4 columns)
+	if (availableSpace < 4) {
+		return `${glyph} ${verbSpan}`;
+	}
+
+	// --- Byline (CC SpinnerAnimationRow.tsx:163-215) -----------------------
+	const status = state?.thinkingStatus ?? null;
+	let effortSuffix = typeof state?.effortSuffix === "string" ? state.effortSuffix : "";
+	if (effortSuffix && (effortSuffix.includes("\x1b") || effortSuffix.includes("\x9b"))) {
+		effortSuffix = sanitizeControlChars(stripAnsi(effortSuffix));
+	}
+	const rawThinkingElapsed =
+		typeof state?.thinkingElapsedMs === "number" &&
+		Number.isFinite(state.thinkingElapsedMs) &&
+		state.thinkingElapsedMs >= 0
+			? Math.floor(state.thinkingElapsedMs)
+			: 0;
+	const thinkingElapsedMs = Math.max(0, rawThinkingElapsed);
+
+	let thinkingFull: string | null = null;
+	let thinkingShort: string | null = null;
+	if (status === "thinking") {
+		const wording = thinkingWording(thinkingElapsedMs);
+		thinkingFull = `${wording}${effortSuffix}`;
+		thinkingShort = effortSuffix ? wording : null;
+	} else if (typeof status === "number" && Number.isFinite(status) && status >= 0) {
+		thinkingFull = `${Math.max(1, Math.round(status / 1000))}sn düşünüldü`;
+	}
+
+	const timerText = formatElapsed(timeMs);
+	const rawTokens =
+		typeof state?.tokens === "number" && Number.isFinite(state.tokens) && state.tokens > 0
+			? Math.floor(state.tokens)
+			: 0;
+	const tokensText = rawTokens > 0 ? `↓ ${formatTokenCount(rawTokens)} token` : null;
+
+	const timerW = visibleWidth(timerText);
+	const tokensW = tokensText ? visibleWidth(tokensText) : 0;
+	const thinkFullW = thinkingFull ? visibleWidth(thinkingFull) : 0;
+	const thinkShortW = thinkingShort ? visibleWidth(thinkingShort) : 0;
+
+	const thinkingPaint =
+		status === "thinking"
+			? paint.thinking
+				? (s: string) => paint.thinking!(s, timeMs)
+				: thinkingGlowPaint(timeMs)
+			: paint.dim;
+
+	// Progressive degradation matrix according to available viewport width with direct formatting
+	if (timerText && tokensText && thinkingFull && timerW + tokensW + thinkFullW + 9 <= availableSpace) {
+		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(timerText)}${paint.dim(" · ")}${paint.dim(tokensText)}${paint.dim(" · ")}${thinkingPaint(thinkingFull)}${paint.dim(")")}`;
+	}
+	if (timerText && tokensText && thinkingShort && timerW + tokensW + thinkShortW + 9 <= availableSpace) {
+		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(timerText)}${paint.dim(" · ")}${paint.dim(tokensText)}${paint.dim(" · ")}${thinkingPaint(thinkingShort)}${paint.dim(")")}`;
+	}
+	if (timerText && tokensText && !thinkingFull && timerW + tokensW + 6 <= availableSpace) {
+		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(timerText)}${paint.dim(" · ")}${paint.dim(tokensText)}${paint.dim(")")}`;
+	}
+	if (timerText && thinkingFull && timerW + thinkFullW + 6 <= availableSpace) {
+		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(timerText)}${paint.dim(" · ")}${thinkingPaint(thinkingFull)}${paint.dim(")")}`;
+	}
+	if (timerText && thinkingShort && timerW + thinkShortW + 6 <= availableSpace) {
+		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(timerText)}${paint.dim(" · ")}${thinkingPaint(thinkingShort)}${paint.dim(")")}`;
+	}
+	if (tokensText && thinkingFull && tokensW + thinkFullW + 6 <= availableSpace) {
+		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(tokensText)}${paint.dim(" · ")}${thinkingPaint(thinkingFull)}${paint.dim(")")}`;
+	}
+	if (tokensText && thinkingShort && tokensW + thinkShortW + 6 <= availableSpace) {
+		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(tokensText)}${paint.dim(" · ")}${thinkingPaint(thinkingShort)}${paint.dim(")")}`;
+	}
+	if (thinkingFull && thinkFullW + 3 <= availableSpace) {
+		if (status === "thinking") {
+			return `${glyph} ${verbSpan} ${thinkingPaint(`(${thinkingFull})`)}`;
+		}
+		return `${glyph} ${verbSpan} ${paint.dim("(")}${thinkingPaint(thinkingFull)}${paint.dim(")")}`;
+	}
+	if (thinkingShort && thinkShortW + 3 <= availableSpace) {
+		return `${glyph} ${verbSpan} ${thinkingPaint(`(${thinkingShort})`)}`;
+	}
+	if (timerText && timerW + 3 <= availableSpace) {
+		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(timerText)}${paint.dim(")")}`;
+	}
+	if (tokensText && tokensW + 3 <= availableSpace) {
+		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(tokensText)}${paint.dim(")")}`;
+	}
+
+	return `${glyph} ${verbSpan}`;
+}
+
+// ---------------------------------------------------------------------------
+// Registration + the 50ms repaint loop
+// ---------------------------------------------------------------------------
+
+/** CC getEffortSuffix (effort.ts:188-196): ` with ${level} effort`, "" when no
+ *  effort applies. pi always has a thinking level; off/none map to "". */
+export function effortSuffixFor(level: string | undefined): string {
+	if (typeof level !== "string" || !level) return "";
+	const sanitized = sanitizeControlChars(stripAnsi(level)).trim();
+	if (!sanitized) return "";
+	switch (sanitized) {
+		case "none":
+		case "off":
+			return "";
+		case "high":
+			return " (yüksek eforla)";
+		case "medium":
+			return " (orta eforla)";
+		case "low":
+			return " (düşük eforla)";
+		case "minimal":
+			return " (minimum eforla)";
+		case "xhigh":
+		case "max":
+			return " (maksimum eforla)";
+		default:
+			return ` (${sanitized} eforla)`;
+	}
+}
+
+export type UiCtx = Pick<ExtensionContext, "hasUI" | "ui">;
+
+export interface SpinnerStateSnapshot {
+	readonly verb: string;
+	readonly animStartMs: number;
+	readonly settledTokens: number;
+	readonly streamTokens: number;
+	readonly totalTokens: number;
+	readonly thinkingStatus: ThinkingStatus;
+	readonly thinkingStartMs: number | null;
+	readonly effortSuffix: string;
+	readonly isActive: boolean;
+	readonly hasActiveTimers: boolean;
+}
+
+export class SpinnerController {
+	private animStartMs = 0;
+	private timer: ReturnType<typeof setInterval> | null = null;
+	private settledTokens = 0;
+	private streamTokens = 0;
+	private thinkingStatus: ThinkingStatus = null;
+	private thinkingStartMs: number | null = null;
+	private effortSuffix = "";
+	private thinkingShowTimer: ReturnType<typeof setTimeout> | null = null;
+	private thinkingClearTimer: ReturnType<typeof setTimeout> | null = null;
+	private repaintTimer: ReturnType<typeof setTimeout> | null = null;
+	private verb: string = sampleVerb();
+	private cachedThemeName: string | undefined = undefined;
+	private cachedPaint: SpinnerPaint | null = null;
+
+	constructor() {
+		activeWorkingVerb = this.verb;
+	}
+
+	public getVerb(): string {
+		return this.verb;
+	}
+
+	public setVerb(v: string): void {
+		const clean = typeof v === "string" ? sanitizeControlChars(stripAnsi(v)).trim() : "";
+		this.verb = clean || "İşleniyor";
+		activeWorkingVerb = this.verb;
+	}
+
+	public getState(): SpinnerStateSnapshot {
+		return {
+			verb: this.verb,
+			animStartMs: this.animStartMs,
+			settledTokens: this.settledTokens,
+			streamTokens: this.streamTokens,
+			totalTokens: this.settledTokens + this.streamTokens,
+			thinkingStatus: this.thinkingStatus,
+			thinkingStartMs: this.thinkingStartMs,
+			effortSuffix: this.effortSuffix,
+			isActive: this.timer !== null,
+			hasActiveTimers: this.hasActiveTimers(),
+		};
+	}
+
+	public hasActiveTimers(): boolean {
+		return (
+			this.timer !== null ||
+			this.thinkingShowTimer !== null ||
+			this.thinkingClearTimer !== null ||
+			this.repaintTimer !== null
+		);
+	}
+
+	public clearThinkingTimers(): void {
+		if (this.thinkingShowTimer !== null) {
+			clearTimeout(this.thinkingShowTimer);
+			this.thinkingShowTimer = null;
+		}
+		if (this.thinkingClearTimer !== null) {
+			clearTimeout(this.thinkingClearTimer);
+			this.thinkingClearTimer = null;
+		}
+	}
+
+	public clearRepaintTimer(): void {
+		if (this.repaintTimer !== null) {
+			clearTimeout(this.repaintTimer);
+			this.repaintTimer = null;
+		}
+	}
+
+	public stopLoop(): void {
+		if (this.timer !== null) {
+			clearInterval(this.timer);
+			this.timer = null;
+		}
+		this.clearRepaintTimer();
+	}
+
+	public beginThinking(): void {
+		if (this.thinkingStartMs !== null) return;
+		this.clearThinkingTimers();
+		this.thinkingStartMs = Date.now();
+		this.thinkingStatus = "thinking";
+	}
+
+	public settleThinking(): void {
+		if (this.thinkingStartMs === null) return;
+		const duration = Math.max(0, Date.now() - this.thinkingStartMs);
+		this.thinkingStartMs = null;
+
+		const showDuration = (): void => {
+			this.thinkingShowTimer = null;
+			if (this.timer === null) {
+				this.thinkingStatus = null;
+				return;
+			}
+			this.thinkingStatus = duration;
+			this.thinkingClearTimer = setTimeout(() => {
+				this.thinkingClearTimer = null;
+				this.thinkingStatus = null;
+			}, 2000);
+			this.thinkingClearTimer.unref?.();
+		};
+
+		const remaining = Math.max(0, 2000 - duration);
+		if (remaining > 0) {
+			this.thinkingShowTimer = setTimeout(showDuration, remaining);
+			this.thinkingShowTimer.unref?.();
+		} else {
+			showDuration();
+		}
+	}
+
+	public paintFor(theme?: Theme): SpinnerPaint {
+		const themeName = theme && typeof theme === "object" && typeof theme.name === "string" ? theme.name : undefined;
+		if (this.cachedPaint !== null && this.cachedThemeName === themeName) {
+			return this.cachedPaint;
+		}
+
+		const pal = resolvePalette(themeName, (token) => {
+			try {
+				if (theme && typeof theme === "object" && typeof theme.fg === "function") {
+					const res = theme.fg(token as ThemeColor, "x");
+					return typeof res === "string" ? res : undefined;
+				}
+				return undefined;
+			} catch {
+				return undefined;
+			}
+		});
+		const scheme = pal.scheme;
+		const accentColor = pal.cc.claude;
+		const shimmerColor = pal.cc.claudeShimmer;
+		const colorMode = pal.colorMode;
+
+		const paint: SpinnerPaint = {
+			accent: (s) => paletteFg(accentColor, s, colorMode),
+			shimmer: (s) => paletteFg(shimmerColor, s, colorMode),
+			dim: (s) => {
+				try {
+					if (theme && typeof theme === "object" && typeof theme.fg === "function") {
+						const res = theme.fg("dim", s);
+						if (typeof res === "string" && res.includes(s)) return res;
+					}
+					return `\x1b[2m${s}\x1b[22m`;
+				} catch {
+					return `\x1b[2m${s}\x1b[22m`;
+				}
+			},
+			thinking: (s, timeMs) => thinkingGlowPaint(timeMs, scheme)(s),
+		};
+
+		this.cachedThemeName = themeName;
+		this.cachedPaint = paint;
+		return paint;
+	}
+
+	public repaint(ctx: UiCtx): void {
+		if (!ctx.hasUI || this.timer === null) return;
+		try {
+			const theme = ctx.ui?.theme;
+			const line = buildSpinnerLine(
+				{
+					verb: this.verb,
+					timeMs: Math.max(0, Date.now() - this.animStartMs),
+					columns: (process.stdout?.columns && process.stdout.columns > 0) ? process.stdout.columns : 80,
+					tokens: Math.max(0, this.settledTokens + this.streamTokens),
+					thinkingStatus: this.thinkingStatus,
+					effortSuffix: this.effortSuffix,
+					thinkingElapsedMs: this.thinkingStartMs !== null ? Math.max(0, Date.now() - this.thinkingStartMs) : 0,
+				},
+				this.paintFor(theme),
+			);
+			ctx.ui.setWorkingMessage(line);
+		} catch {
+			// UI torn down, stream closed, or stdout unavailable — stop loop immediately
+			this.stopLoop();
+		}
+	}
+
+	public scheduleRepaint(ctx: UiCtx): void {
+		if (!ctx.hasUI || this.timer === null) return;
+		if (this.repaintTimer !== null) return;
+		this.repaintTimer = setTimeout(() => {
+			this.repaintTimer = null;
+			this.repaint(ctx);
+		}, 0);
+		this.repaintTimer.unref?.();
+	}
+
+	public handleSessionStart(ctx: UiCtx & { cwd?: string }): void {
+		if (!ctx || !ctx.hasUI) return;
+		try {
+			ctx.ui?.setWorkingIndicator?.({ frames: [] });
+		} catch {
+			/* best-effort */
+		}
+		try {
+			const safeCwd = typeof ctx.cwd === "string" ? sanitizeTitle(ctx.cwd) : "";
+			const title = safeCwd ? `✻ ${safeCwd}` : "✻ pi";
+			ctx.ui?.setTitle?.(title);
+		} catch {
+			/* best-effort */
+		}
+	}
+
+	public handleAgentStart(ctx: UiCtx): void {
+		this.verb = sampleVerb();
+		activeWorkingVerb = this.verb;
+		this.animStartMs = Date.now();
+		this.settledTokens = 0;
+		this.streamTokens = 0;
+		this.clearThinkingTimers();
+		this.clearRepaintTimer();
+		this.thinkingStatus = null;
+		this.thinkingStartMs = null;
+		this.effortSuffix = "";
+		this.stopLoop();
+		if (!ctx.hasUI) return;
+		this.timer = setInterval(() => this.repaint(ctx), TICK_MS);
+		this.timer.unref?.();
+		this.repaint(ctx);
+	}
+
+	public handleMessageUpdate(event: MessageUpdateEvent, ctx: UiCtx & { thinkingLevel?: string }): void {
+		if (!event || typeof event !== "object") return;
+		const ame = event.assistantMessageEvent;
+		if (!ame || typeof ame !== "object") return;
+
+		let changed = false;
+		const usage =
+			"partial" in ame && ame.partial && typeof ame.partial === "object"
+				? ame.partial.usage
+				: "message" in ame && ame.message && typeof ame.message === "object"
+					? ame.message.usage
+					: undefined;
+		const out = usage?.output;
+		if (typeof out === "number" && Number.isFinite(out) && !Number.isNaN(out) && out >= 0 && out !== this.streamTokens) {
+			this.streamTokens = Math.floor(out);
+			changed = true;
+		}
+		if (ame.type === "thinking_start") {
+			this.effortSuffix = effortSuffixFor(typeof ctx?.thinkingLevel === "string" ? ctx.thinkingLevel : undefined);
+			this.beginThinking();
+			changed = true;
+		} else if (ame.type === "thinking_end") {
+			this.settleThinking();
+			changed = true;
+		}
+		if (changed && ctx?.hasUI && this.timer !== null) {
+			this.scheduleRepaint(ctx);
+		}
+	}
+
+	public handleMessageEnd(event: MessageEndEvent, ctx: UiCtx): void {
+		if (!event || typeof event !== "object" || event.message?.role !== "assistant") return;
+		const msg = event.message;
+		const usage = msg && typeof msg === "object" && "usage" in msg && msg.usage && typeof msg.usage === "object" ? msg.usage : undefined;
+		const out = usage?.output;
+		const finalTokens = typeof out === "number" && Number.isFinite(out) && !Number.isNaN(out) && out >= 0 ? Math.floor(out) : this.streamTokens;
+		this.settledTokens += finalTokens;
+		this.streamTokens = 0;
+		this.settleThinking();
+		if (ctx?.hasUI && this.timer !== null) {
+			this.scheduleRepaint(ctx);
+		}
+	}
+
+	public handleAgentEnd(): void {
+		this.settleThinking();
+	}
+
+	public handleAgentSettled(ctx: UiCtx): void {
+		this.stopLoop();
+		this.clearThinkingTimers();
+		this.clearRepaintTimer();
+		if (ctx.hasUI) {
+			try {
+				ctx.ui.setWorkingMessage();
+			} catch {
+				/* best-effort */
+			}
+		}
+	}
+
+	public handleSessionShutdown(): void {
+		this.stopLoop();
+		this.clearThinkingTimers();
+		this.clearRepaintTimer();
+	}
+
+	public dispose(): void {
+		this.stopLoop();
+		this.clearThinkingTimers();
+		this.clearRepaintTimer();
+	}
+}
+
+export function registerSpinner(pi: ExtensionAPI): SpinnerController {
+	const controller = new SpinnerController();
+
+	pi.on("session_start", async (_event, ctx) => {
+		controller.handleSessionStart(ctx);
+	});
+
+	pi.on("agent_start", async (_event, ctx) => {
+		controller.handleAgentStart(ctx);
+	});
+
+	pi.on("message_update", async (event, ctx) => {
+		controller.handleMessageUpdate(event, ctx);
+	});
+
+	pi.on("message_end", async (event, ctx) => {
+		controller.handleMessageEnd(event, ctx);
+	});
+
+	pi.on("agent_end", async () => {
+		controller.handleAgentEnd();
+	});
+
+	pi.on("agent_settled", async (_event, ctx) => {
+		controller.handleAgentSettled(ctx);
+	});
+
+	pi.on("session_shutdown", async () => {
+		controller.handleSessionShutdown();
+	});
+
+	return controller;
+}
