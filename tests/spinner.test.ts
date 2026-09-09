@@ -11,6 +11,7 @@ import {
 	sampleVerb,
 	currentWorkingVerb,
 	registerSpinner,
+	SpinnerController,
 	type SpinnerPaint,
 	type SpinnerFrameState,
 } from "../spinner.ts";
@@ -214,6 +215,67 @@ describe("spinner", () => {
 			const stripped = stripAnsi(line);
 			assert.ok(stripped.includes("15sn"));
 			assert.ok(stripped.includes("↓ 1.5k token"));
+		});
+
+		it("includes live tokensPerSecond when space allows and drops it when tight", () => {
+			const wideState: SpinnerFrameState = {
+				verb: "İşleniyor",
+				timeMs: 15000,
+				columns: 120,
+				tokens: 1500,
+				tokensPerSecond: 48.4,
+			};
+			const wideLine = buildSpinnerLine(wideState, mockPaint);
+			const wideStripped = stripAnsi(wideLine);
+			assert.ok(wideStripped.includes("15sn"));
+			assert.ok(wideStripped.includes("↓ 1.5k token"));
+			assert.ok(wideStripped.includes("48 tok/s"));
+
+			// When constrained to 36 columns: drops tok/s but keeps tokens and timer
+			const mediumState: SpinnerFrameState = {
+				...wideState,
+				columns: 38,
+			};
+			const mediumLine = buildSpinnerLine(mediumState, mockPaint);
+			const mediumStripped = stripAnsi(mediumLine);
+			assert.ok(visibleWidth(mediumLine) <= 38);
+			assert.ok(!mediumStripped.includes("tok/s"));
+			assert.ok(mediumStripped.includes("↓ 1.5k token"));
+		});
+
+		it("tracks live tokensPerSecond during message_update and message_end", () => {
+			const controller = new SpinnerController();
+			const mockCtx = {
+				hasUI: true,
+				ui: {
+					setWorkingMessage: () => {},
+					setWorkingIndicator: () => {},
+					setTitle: () => {},
+				},
+			};
+
+			controller.handleAgentStart(mockCtx as any);
+			assert.equal(controller.getTokensPerSecond(), null);
+
+			// First delta establishes start time and baseline
+			controller.handleMessageUpdate(
+				{
+					assistantMessageEvent: {
+						type: "text_delta",
+						delta: "Merhaba! ",
+					},
+				} as any,
+				mockCtx as any,
+			);
+
+			// Artificially simulate 500ms elapsed with another chunk
+			// Use setTokensPerSecond to test direct setter and getter
+			controller.setTokensPerSecond(42);
+			assert.equal(controller.getTokensPerSecond(), 42);
+			assert.equal(controller.getState().tokensPerSecond, 42);
+
+			controller.handleAgentSettled(mockCtx as any);
+			assert.equal(controller.getTokensPerSecond(), null);
 		});
 
 		it("includes thinking status and effort suffix", () => {

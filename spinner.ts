@@ -30,7 +30,6 @@ import {
 	resolvePalette,
 	visibleWidth,
 	sanitizeControlChars,
-	sanitizeSafeAnsi,
 	sanitizeTitle,
 	stripAnsi,
 } from "./palette.ts";
@@ -38,7 +37,8 @@ import {
 // CC Spinner/utils.ts getDefaultCharacters(): Ghostty renders ✽ slightly offset,
 // so the last frame is * there.
 function defaultCharacters(): readonly string[] {
-	if (process.env.TERM === "xterm-ghostty") return ["·", "✢", "✳", "✶", "✻", "*"];
+	if (process.env.TERM === "xterm-ghostty")
+		return ["·", "✢", "✳", "✶", "✻", "*"];
 	return ["·", "✢", "✳", "✶", "✻", "✽"];
 }
 
@@ -54,24 +54,96 @@ const GLIMMER_MS = 200;
 
 // Türkçe doğal, akıcı ve tek kelimelik eylem fiilleri
 const VERBS = [
-	"Aktarılıyor", "Algılanıyor", "Araştırılıyor", "Arındırılıyor", "Aydınlatılıyor",
-	"Ayıklanıyor", "Ayrıştırılıyor", "Bağlanıyor", "Biçimlendiriliyor", "Birleştiriliyor",
-	"Bölümleniyor", "Bütünleştiriliyor", "Çözümleniyor", "Değerlendiriliyor", "Dengeleniyor",
-	"Denetleniyor", "Deneniyor", "Derinleştiriliyor", "Derleniyor", "Detaylandırılıyor",
-	"Diziliyor", "Doğrulanıyor", "Dönüştürülüyor", "Düzeltiliyor", "Düzenleniyor",
-	"Düşünülüyor", "Eleniyor", "Eşleştiriliyor", "Filtreleniyor", "Geliştiriliyor",
-	"Genişletiliyor", "Gruplanıyor", "Güçlendiriliyor", "Güncelleniyor", "Harmanlanıyor",
-	"Hazırlanıyor", "Hesaplanıyor", "Hizalanıyor", "İlerletiliyor", "İnceleniyor",
-	"İndirgeniyor", "İşleniyor", "İyileştiriliyor", "İzleniyor", "Kavranıyor",
-	"Kaynaştırılıyor", "Keşfediliyor", "Kodlanıyor", "Konumlandırılıyor", "Kurgulanıyor",
-	"Modelleniyor", "Netleştiriliyor", "Odaklanılıyor", "Oluşturuluyor", "Onarılıyor",
-	"Ölçülüyor", "Öngörülüyor", "Özetleniyor", "Paketleniyor", "Planlanıyor",
-	"Programlanıyor", "Rötuşlanıyor", "Sabitleniyor", "Saflaştırılıyor", "Sarmalanıyor",
-	"Seçiliyor", "Sentezleniyor", "Sıralanıyor", "Sınanıyor", "Sorgulanıyor",
-	"Soyutlanıyor", "Süzülüyor", "Şekillendiriliyor", "Tamamlanıyor", "Taranıyor",
-	"Tasarlanıyor", "Tartılıyor", "Tazeleniyor", "Temizleniyor", "Toparlanıyor",
-	"Türetiliyor", "Uyarlanıyor", "Uyumlanıyor", "Üretiliyor", "Vurgulanıyor",
-	"Yapılandırılıyor", "Yenileniyor", "Yerleştiriliyor", "Yorumlanıyor", "Yürütülüyor",
+	"Aktarılıyor",
+	"Algılanıyor",
+	"Araştırılıyor",
+	"Arındırılıyor",
+	"Aydınlatılıyor",
+	"Ayıklanıyor",
+	"Ayrıştırılıyor",
+	"Bağlanıyor",
+	"Biçimlendiriliyor",
+	"Birleştiriliyor",
+	"Bölümleniyor",
+	"Bütünleştiriliyor",
+	"Çözümleniyor",
+	"Değerlendiriliyor",
+	"Dengeleniyor",
+	"Denetleniyor",
+	"Deneniyor",
+	"Derinleştiriliyor",
+	"Derleniyor",
+	"Detaylandırılıyor",
+	"Diziliyor",
+	"Doğrulanıyor",
+	"Dönüştürülüyor",
+	"Düzeltiliyor",
+	"Düzenleniyor",
+	"Düşünülüyor",
+	"Eleniyor",
+	"Eşleştiriliyor",
+	"Filtreleniyor",
+	"Geliştiriliyor",
+	"Genişletiliyor",
+	"Gruplanıyor",
+	"Güçlendiriliyor",
+	"Güncelleniyor",
+	"Harmanlanıyor",
+	"Hazırlanıyor",
+	"Hesaplanıyor",
+	"Hizalanıyor",
+	"İlerletiliyor",
+	"İnceleniyor",
+	"İndirgeniyor",
+	"İşleniyor",
+	"İyileştiriliyor",
+	"İzleniyor",
+	"Kavranıyor",
+	"Kaynaştırılıyor",
+	"Keşfediliyor",
+	"Kodlanıyor",
+	"Konumlandırılıyor",
+	"Kurgulanıyor",
+	"Modelleniyor",
+	"Netleştiriliyor",
+	"Odaklanılıyor",
+	"Oluşturuluyor",
+	"Onarılıyor",
+	"Ölçülüyor",
+	"Öngörülüyor",
+	"Özetleniyor",
+	"Paketleniyor",
+	"Planlanıyor",
+	"Programlanıyor",
+	"Rötuşlanıyor",
+	"Sabitleniyor",
+	"Saflaştırılıyor",
+	"Sarmalanıyor",
+	"Seçiliyor",
+	"Sentezleniyor",
+	"Sıralanıyor",
+	"Sınanıyor",
+	"Sorgulanıyor",
+	"Soyutlanıyor",
+	"Süzülüyor",
+	"Şekillendiriliyor",
+	"Tamamlanıyor",
+	"Taranıyor",
+	"Tasarlanıyor",
+	"Tartılıyor",
+	"Tazeleniyor",
+	"Temizleniyor",
+	"Toparlanıyor",
+	"Türetiliyor",
+	"Uyarlanıyor",
+	"Uyumlanıyor",
+	"Üretiliyor",
+	"Vurgulanıyor",
+	"Yapılandırılıyor",
+	"Yenileniyor",
+	"Yerleştiriliyor",
+	"Yorumlanıyor",
+	"Yürütülüyor",
 	"Zenginleştiriliyor",
 ] as const;
 
@@ -113,6 +185,8 @@ export interface SpinnerFrameState {
 	readonly columns: number;
 	/** Cumulative downstream (output) tokens this request; segment hidden when 0/undefined. */
 	readonly tokens?: number;
+	/** Tokens generated per second (live streaming rate or final message rate). */
+	readonly tokensPerSecond?: number | null;
 	/** CC thinkingStatus (Spinner.tsx:125). */
 	readonly thinkingStatus?: ThinkingStatus;
 	/** CC getEffortSuffix (effort.ts:188): ` with high effort`, "" when unset. */
@@ -124,7 +198,10 @@ export interface SpinnerFrameState {
 
 /** CC-style compact token count: 847 → "847", 1234 → "1.2k", 25600 → "26k", 1500000 -> "1.5M". */
 export function formatTokenCount(n: number): string {
-	const safe = typeof n === "number" && Number.isFinite(n) && !Number.isNaN(n) && n >= 0 ? Math.floor(n) : 0;
+	const safe =
+		typeof n === "number" && Number.isFinite(n) && !Number.isNaN(n) && n >= 0
+			? Math.floor(n)
+			: 0;
 	if (safe < 1000) return String(safe);
 	if (safe < 10_000) {
 		const thousands = Math.floor(safe / 1000);
@@ -143,7 +220,10 @@ export function formatTokenCount(n: number): string {
 
 /** Elapsed time for the spinner byline: 12sn / 1dk 5sn / 1sa 2dk 3sn. */
 export function formatElapsed(ms: number): string {
-	const safe = typeof ms === "number" && Number.isFinite(ms) && !Number.isNaN(ms) && ms >= 0 ? Math.floor(ms) : 0;
+	const safe =
+		typeof ms === "number" && Number.isFinite(ms) && !Number.isNaN(ms) && ms >= 0
+			? Math.floor(ms)
+			: 0;
 	const total = Math.floor(safe / 1000);
 	const h = Math.floor(total / 3600);
 	const m = Math.floor((total % 3600) / 60);
@@ -159,9 +239,14 @@ export function formatElapsed(ms: number): string {
  * the rest get the base (accent) color. When the sweep is offscreen the whole
  * message renders in the base color.
  */
-export function glimmerMessage(message: string, glimmerIndex: number, paint: SpinnerPaint): string {
+export function glimmerMessage(
+	message: string,
+	glimmerIndex: number,
+	paint: SpinnerPaint,
+): string {
 	if (!message || typeof message !== "string") return "";
-	if (!Number.isFinite(glimmerIndex) || Number.isNaN(glimmerIndex)) return paint.accent(message);
+	if (!Number.isFinite(glimmerIndex) || Number.isNaN(glimmerIndex))
+		return paint.accent(message);
 
 	const shimmerStart = glimmerIndex - 1;
 	const shimmerEnd = glimmerIndex + 1;
@@ -202,7 +287,11 @@ export function glimmerMessage(message: string, glimmerIndex: number, paint: Spi
 	const shim = chars.slice(start, end + 1).join("");
 	const after = end + 1 < messageWidth ? chars.slice(end + 1).join("") : "";
 
-	return (before ? paint.accent(before) : "") + (shim ? paint.shimmer(shim) : "") + (after ? paint.accent(after) : "");
+	return (
+		(before ? paint.accent(before) : "") +
+		(shim ? paint.shimmer(shim) : "") +
+		(after ? paint.accent(after) : "")
+	);
 }
 
 // CC SpinnerAnimationRow.tsx:24-35 — the in-progress thinking segment breathes
@@ -214,19 +303,33 @@ const THINKING_DELAY_MS = 3000;
 const THINKING_GLOW_PERIOD_S = 2;
 
 // Precomputed truecolor gray escapes (0-255)
-const RGB_GRAY_ANSI: readonly string[] = Array.from({ length: 256 }, (_, v) => `\x1b[38;2;${v};${v};${v}m`);
+const RGB_GRAY_ANSI: readonly string[] = Array.from(
+	{ length: 256 },
+	(_, v) => `\x1b[38;2;${v};${v};${v}m`,
+);
 
-export function thinkingGlowPaint(timeMs: number, scheme: "dark" | "light" = "dark"): (s: string) => string {
+export function thinkingGlowPaint(
+	timeMs: number,
+	scheme: "dark" | "light" = "dark",
+): (s: string) => string {
 	const safeMs = Math.max(0, Number.isFinite(timeMs) ? timeMs : 0);
 	const opacity =
 		safeMs < THINKING_DELAY_MS
 			? 0
-			: (Math.sin((((safeMs - THINKING_DELAY_MS) / 1000) * (Math.PI * 2)) / THINKING_GLOW_PERIOD_S) + 1) / 2;
+			: (Math.sin(
+					(((safeMs - THINKING_DELAY_MS) / 1000) * (Math.PI * 2)) /
+						THINKING_GLOW_PERIOD_S,
+				) +
+					1) /
+				2;
 	let v: number;
 	if (scheme === "light") {
 		v = Math.round(105 - (105 - 65) * opacity);
 	} else {
-		v = Math.round(THINKING_INACTIVE_GRAY + (THINKING_SHIMMER_GRAY - THINKING_INACTIVE_GRAY) * opacity);
+		v = Math.round(
+			THINKING_INACTIVE_GRAY +
+				(THINKING_SHIMMER_GRAY - THINKING_INACTIVE_GRAY) * opacity,
+		);
 	}
 	const ansiPrefix = RGB_GRAY_ANSI[v] ?? `\x1b[38;2;${v};${v};${v}m`;
 	return (s) => `${ansiPrefix}${s}\x1b[39m`;
@@ -240,7 +343,10 @@ export function thinkingGlowPaint(timeMs: number, scheme: "dark" | "light" = "da
  * thinking-token budget, which pi does not expose).
  */
 export function thinkingWording(blockElapsedMs: number): string {
-	const safe = typeof blockElapsedMs === "number" && Number.isFinite(blockElapsedMs) ? Math.max(0, blockElapsedMs) : 0;
+	const safe =
+		typeof blockElapsedMs === "number" && Number.isFinite(blockElapsedMs)
+			? Math.max(0, blockElapsedMs)
+			: 0;
 	if (safe >= 120_000) return "düşünme tamamlanmak üzere";
 	if (safe >= 60_000) return "biraz daha düşünülüyor";
 	if (safe >= 30_000) return "derinlemesine düşünülüyor";
@@ -263,7 +369,10 @@ export function thinkingWording(blockElapsedMs: number): string {
  * Compact: [Glyph] [Verb]
  * Ultra-narrow: [Glyph] [Truncated verb]… (never exceeds columns or breaks line wrap).
  */
-export function buildSpinnerLine(state: SpinnerFrameState, paint: SpinnerPaint): string {
+export function buildSpinnerLine(
+	state: SpinnerFrameState,
+	paint: SpinnerPaint,
+): string {
 	let cleanVerb = typeof state?.verb === "string" ? state.verb : "";
 	if (cleanVerb) {
 		if (
@@ -290,7 +399,9 @@ export function buildSpinnerLine(state: SpinnerFrameState, paint: SpinnerPaint):
 	}
 	const rawVerb = cleanVerb || "İşleniyor";
 	const timeMs =
-		typeof state?.timeMs === "number" && Number.isFinite(state.timeMs) && state.timeMs >= 0
+		typeof state?.timeMs === "number" &&
+		Number.isFinite(state.timeMs) &&
+		state.timeMs >= 0
 			? Math.floor(state.timeMs)
 			: 0;
 	const frame = Math.floor(timeMs / FRAME_MS) % SPINNER.length;
@@ -298,7 +409,10 @@ export function buildSpinnerLine(state: SpinnerFrameState, paint: SpinnerPaint):
 	const message = `${rawVerb}…`;
 	const messageWidth = visibleWidth(message);
 
-	const rawCols = typeof state?.columns === "number" && Number.isFinite(state.columns) ? state.columns : 80;
+	const rawCols =
+		typeof state?.columns === "number" && Number.isFinite(state.columns)
+			? state.columns
+			: 80;
 	const cols = Math.max(0, Math.floor(rawCols));
 
 	// Progressive ultra-narrow viewport collapsing for constrained positive columns
@@ -331,8 +445,12 @@ export function buildSpinnerLine(state: SpinnerFrameState, paint: SpinnerPaint):
 
 	// --- Byline (CC SpinnerAnimationRow.tsx:163-215) -----------------------
 	const status = state?.thinkingStatus ?? null;
-	let effortSuffix = typeof state?.effortSuffix === "string" ? state.effortSuffix : "";
-	if (effortSuffix && (effortSuffix.includes("\x1b") || effortSuffix.includes("\x9b"))) {
+	let effortSuffix =
+		typeof state?.effortSuffix === "string" ? state.effortSuffix : "";
+	if (
+		effortSuffix &&
+		(effortSuffix.includes("\x1b") || effortSuffix.includes("\x9b"))
+	) {
 		effortSuffix = sanitizeControlChars(stripAnsi(effortSuffix));
 	}
 	const rawThinkingElapsed =
@@ -349,19 +467,35 @@ export function buildSpinnerLine(state: SpinnerFrameState, paint: SpinnerPaint):
 		const wording = thinkingWording(thinkingElapsedMs);
 		thinkingFull = `${wording}${effortSuffix}`;
 		thinkingShort = effortSuffix ? wording : null;
-	} else if (typeof status === "number" && Number.isFinite(status) && status >= 0) {
+	} else if (
+		typeof status === "number" &&
+		Number.isFinite(status) &&
+		status >= 0
+	) {
 		thinkingFull = `${Math.max(1, Math.round(status / 1000))}sn düşünüldü`;
 	}
 
 	const timerText = formatElapsed(timeMs);
 	const rawTokens =
-		typeof state?.tokens === "number" && Number.isFinite(state.tokens) && state.tokens > 0
+		typeof state?.tokens === "number" &&
+		Number.isFinite(state.tokens) &&
+		state.tokens > 0
 			? Math.floor(state.tokens)
 			: 0;
-	const tokensText = rawTokens > 0 ? `↓ ${formatTokenCount(rawTokens)} token` : null;
+	const tokensText =
+		rawTokens > 0 ? `↓ ${formatTokenCount(rawTokens)} token` : null;
+
+	const rawTps =
+		typeof state?.tokensPerSecond === "number" &&
+		Number.isFinite(state.tokensPerSecond) &&
+		state.tokensPerSecond > 0
+			? Math.round(state.tokensPerSecond)
+			: 0;
+	const tpsText = rawTps > 0 ? `${rawTps} tok/s` : null;
 
 	const timerW = visibleWidth(timerText);
 	const tokensW = tokensText ? visibleWidth(tokensText) : 0;
+	const tpsW = tpsText ? visibleWidth(tpsText) : 0;
 	const thinkFullW = thinkingFull ? visibleWidth(thinkingFull) : 0;
 	const thinkShortW = thinkingShort ? visibleWidth(thinkingShort) : 0;
 
@@ -373,13 +507,55 @@ export function buildSpinnerLine(state: SpinnerFrameState, paint: SpinnerPaint):
 			: paint.dim;
 
 	// Progressive degradation matrix according to available viewport width with direct formatting
-	if (timerText && tokensText && thinkingFull && timerW + tokensW + thinkFullW + 9 <= availableSpace) {
+	if (
+		timerText &&
+		tokensText &&
+		tpsText &&
+		thinkingFull &&
+		timerW + tokensW + tpsW + thinkFullW + 12 <= availableSpace
+	) {
+		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(timerText)}${paint.dim(" · ")}${paint.dim(tokensText)}${paint.dim(" · ")}${paint.dim(tpsText)}${paint.dim(" · ")}${thinkingPaint(thinkingFull)}${paint.dim(")")}`;
+	}
+	if (
+		timerText &&
+		tokensText &&
+		tpsText &&
+		thinkingShort &&
+		timerW + tokensW + tpsW + thinkShortW + 12 <= availableSpace
+	) {
+		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(timerText)}${paint.dim(" · ")}${paint.dim(tokensText)}${paint.dim(" · ")}${paint.dim(tpsText)}${paint.dim(" · ")}${thinkingPaint(thinkingShort)}${paint.dim(")")}`;
+	}
+	if (
+		timerText &&
+		tokensText &&
+		thinkingFull &&
+		timerW + tokensW + thinkFullW + 9 <= availableSpace
+	) {
 		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(timerText)}${paint.dim(" · ")}${paint.dim(tokensText)}${paint.dim(" · ")}${thinkingPaint(thinkingFull)}${paint.dim(")")}`;
 	}
-	if (timerText && tokensText && thinkingShort && timerW + tokensW + thinkShortW + 9 <= availableSpace) {
+	if (
+		timerText &&
+		tokensText &&
+		thinkingShort &&
+		timerW + tokensW + thinkShortW + 9 <= availableSpace
+	) {
 		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(timerText)}${paint.dim(" · ")}${paint.dim(tokensText)}${paint.dim(" · ")}${thinkingPaint(thinkingShort)}${paint.dim(")")}`;
 	}
-	if (timerText && tokensText && !thinkingFull && timerW + tokensW + 6 <= availableSpace) {
+	if (
+		timerText &&
+		tokensText &&
+		tpsText &&
+		!thinkingFull &&
+		timerW + tokensW + tpsW + 9 <= availableSpace
+	) {
+		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(timerText)}${paint.dim(" · ")}${paint.dim(tokensText)}${paint.dim(" · ")}${paint.dim(tpsText)}${paint.dim(")")}`;
+	}
+	if (
+		timerText &&
+		tokensText &&
+		!thinkingFull &&
+		timerW + tokensW + 6 <= availableSpace
+	) {
 		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(timerText)}${paint.dim(" · ")}${paint.dim(tokensText)}${paint.dim(")")}`;
 	}
 	if (timerText && thinkingFull && timerW + thinkFullW + 6 <= availableSpace) {
@@ -388,10 +564,30 @@ export function buildSpinnerLine(state: SpinnerFrameState, paint: SpinnerPaint):
 	if (timerText && thinkingShort && timerW + thinkShortW + 6 <= availableSpace) {
 		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(timerText)}${paint.dim(" · ")}${thinkingPaint(thinkingShort)}${paint.dim(")")}`;
 	}
+	if (
+		tokensText &&
+		tpsText &&
+		thinkingFull &&
+		tokensW + tpsW + thinkFullW + 9 <= availableSpace
+	) {
+		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(tokensText)}${paint.dim(" · ")}${paint.dim(tpsText)}${paint.dim(" · ")}${thinkingPaint(thinkingFull)}${paint.dim(")")}`;
+	}
+	if (
+		tokensText &&
+		tpsText &&
+		thinkingShort &&
+		tokensW + tpsW + thinkShortW + 9 <= availableSpace
+	) {
+		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(tokensText)}${paint.dim(" · ")}${paint.dim(tpsText)}${paint.dim(" · ")}${thinkingPaint(thinkingShort)}${paint.dim(")")}`;
+	}
 	if (tokensText && thinkingFull && tokensW + thinkFullW + 6 <= availableSpace) {
 		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(tokensText)}${paint.dim(" · ")}${thinkingPaint(thinkingFull)}${paint.dim(")")}`;
 	}
-	if (tokensText && thinkingShort && tokensW + thinkShortW + 6 <= availableSpace) {
+	if (
+		tokensText &&
+		thinkingShort &&
+		tokensW + thinkShortW + 6 <= availableSpace
+	) {
 		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(tokensText)}${paint.dim(" · ")}${thinkingPaint(thinkingShort)}${paint.dim(")")}`;
 	}
 	if (thinkingFull && thinkFullW + 3 <= availableSpace) {
@@ -405,6 +601,9 @@ export function buildSpinnerLine(state: SpinnerFrameState, paint: SpinnerPaint):
 	}
 	if (timerText && timerW + 3 <= availableSpace) {
 		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(timerText)}${paint.dim(")")}`;
+	}
+	if (tokensText && tpsText && tokensW + tpsW + 6 <= availableSpace) {
+		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(tokensText)}${paint.dim(" · ")}${paint.dim(tpsText)}${paint.dim(")")}`;
 	}
 	if (tokensText && tokensW + 3 <= availableSpace) {
 		return `${glyph} ${verbSpan} ${paint.dim("(")}${paint.dim(tokensText)}${paint.dim(")")}`;
@@ -451,6 +650,7 @@ export interface SpinnerStateSnapshot {
 	readonly settledTokens: number;
 	readonly streamTokens: number;
 	readonly totalTokens: number;
+	readonly tokensPerSecond: number | null;
 	readonly thinkingStatus: ThinkingStatus;
 	readonly thinkingStartMs: number | null;
 	readonly effortSuffix: string;
@@ -473,6 +673,17 @@ export class SpinnerController {
 	private cachedThemeName: string | undefined = undefined;
 	private cachedPaint: SpinnerPaint | null = null;
 
+	// Live streaming token rate tracking
+	private contentStreamStart: number | null = null;
+	private lastContentDeltaAt: number | null = null;
+	private contentCharacters = 0;
+	private firstContentDeltaCharacters = 0;
+	private contentDeltaCount = 0;
+	private sawToolCall = false;
+	private runContentTokens = 0;
+	private runContentStreamMs = 0;
+	private currentTps: number | null = null;
+
 	constructor() {
 		activeWorkingVerb = this.verb;
 	}
@@ -482,9 +693,19 @@ export class SpinnerController {
 	}
 
 	public setVerb(v: string): void {
-		const clean = typeof v === "string" ? sanitizeControlChars(stripAnsi(v)).trim() : "";
+		const clean =
+			typeof v === "string" ? sanitizeControlChars(stripAnsi(v)).trim() : "";
 		this.verb = clean || "İşleniyor";
 		activeWorkingVerb = this.verb;
+	}
+
+	public getTokensPerSecond(): number | null {
+		return this.currentTps;
+	}
+
+	public setTokensPerSecond(tps: number | null): void {
+		this.currentTps =
+			typeof tps === "number" && Number.isFinite(tps) && tps > 0 ? tps : null;
 	}
 
 	public getState(): SpinnerStateSnapshot {
@@ -494,6 +715,7 @@ export class SpinnerController {
 			settledTokens: this.settledTokens,
 			streamTokens: this.streamTokens,
 			totalTokens: this.settledTokens + this.streamTokens,
+			tokensPerSecond: this.currentTps,
 			thinkingStatus: this.thinkingStatus,
 			thinkingStartMs: this.thinkingStartMs,
 			effortSuffix: this.effortSuffix,
@@ -573,7 +795,10 @@ export class SpinnerController {
 	}
 
 	public paintFor(theme?: Theme): SpinnerPaint {
-		const themeName = theme && typeof theme === "object" && typeof theme.name === "string" ? theme.name : undefined;
+		const themeName =
+			theme && typeof theme === "object" && typeof theme.name === "string"
+				? theme.name
+				: undefined;
 		if (this.cachedPaint !== null && this.cachedThemeName === themeName) {
 			return this.cachedPaint;
 		}
@@ -624,11 +849,18 @@ export class SpinnerController {
 				{
 					verb: this.verb,
 					timeMs: Math.max(0, Date.now() - this.animStartMs),
-					columns: (process.stdout?.columns && process.stdout.columns > 0) ? process.stdout.columns : 80,
+					columns:
+						process.stdout?.columns && process.stdout.columns > 0
+							? process.stdout.columns
+							: 80,
 					tokens: Math.max(0, this.settledTokens + this.streamTokens),
+					tokensPerSecond: this.currentTps,
 					thinkingStatus: this.thinkingStatus,
 					effortSuffix: this.effortSuffix,
-					thinkingElapsedMs: this.thinkingStartMs !== null ? Math.max(0, Date.now() - this.thinkingStartMs) : 0,
+					thinkingElapsedMs:
+						this.thinkingStartMs === null
+							? 0
+							: Math.max(0, Date.now() - this.thinkingStartMs),
 				},
 				this.paintFor(theme),
 			);
@@ -671,6 +903,15 @@ export class SpinnerController {
 		this.animStartMs = Date.now();
 		this.settledTokens = 0;
 		this.streamTokens = 0;
+		this.currentTps = null;
+		this.contentStreamStart = null;
+		this.lastContentDeltaAt = null;
+		this.contentCharacters = 0;
+		this.firstContentDeltaCharacters = 0;
+		this.contentDeltaCount = 0;
+		this.sawToolCall = false;
+		this.runContentTokens = 0;
+		this.runContentStreamMs = 0;
 		this.clearThinkingTimers();
 		this.clearRepaintTimer();
 		this.thinkingStatus = null;
@@ -683,7 +924,10 @@ export class SpinnerController {
 		this.repaint(ctx);
 	}
 
-	public handleMessageUpdate(event: MessageUpdateEvent, ctx: UiCtx & { thinkingLevel?: string }): void {
+	public handleMessageUpdate(
+		event: MessageUpdateEvent,
+		ctx: UiCtx & { thinkingLevel?: string },
+	): void {
 		if (!event || typeof event !== "object") return;
 		const ame = event.assistantMessageEvent;
 		if (!ame || typeof ame !== "object") return;
@@ -696,12 +940,51 @@ export class SpinnerController {
 					? ame.message.usage
 					: undefined;
 		const out = usage?.output;
-		if (typeof out === "number" && Number.isFinite(out) && !Number.isNaN(out) && out >= 0 && out !== this.streamTokens) {
+		if (
+			typeof out === "number" &&
+			Number.isFinite(out) &&
+			!Number.isNaN(out) &&
+			out >= 0 &&
+			out !== this.streamTokens
+		) {
 			this.streamTokens = Math.floor(out);
+			if (this.contentStreamStart !== null) {
+				const elapsedMs = Date.now() - this.contentStreamStart;
+				if (elapsedMs >= 200 && this.streamTokens > 0) {
+					this.currentTps = this.streamTokens / (elapsedMs / 1000);
+				}
+			}
 			changed = true;
 		}
+		if (ame.type === "toolcall_delta") {
+			this.sawToolCall = true;
+		} else if (ame.type === "text_delta" || ame.type === "thinking_delta") {
+			const delta =
+				typeof (ame as any).delta === "string" ? (ame as any).delta : "";
+			if (delta.length > 0) {
+				const now = Date.now();
+				if (this.contentStreamStart === null) {
+					this.contentStreamStart = now;
+					this.firstContentDeltaCharacters = delta.length;
+				}
+				this.lastContentDeltaAt = now;
+				this.contentCharacters += delta.length;
+				this.contentDeltaCount++;
+
+				const elapsedMs = now - this.contentStreamStart;
+				const streamedChars =
+					this.contentCharacters - this.firstContentDeltaCharacters;
+				if (this.contentDeltaCount >= 2 && elapsedMs >= 200 && streamedChars > 0) {
+					const estimatedTokens = Math.ceil(streamedChars / 4);
+					this.currentTps = estimatedTokens / (elapsedMs / 1000);
+					changed = true;
+				}
+			}
+		}
 		if (ame.type === "thinking_start") {
-			this.effortSuffix = effortSuffixFor(typeof ctx?.thinkingLevel === "string" ? ctx.thinkingLevel : undefined);
+			this.effortSuffix = effortSuffixFor(
+				typeof ctx?.thinkingLevel === "string" ? ctx.thinkingLevel : undefined,
+			);
 			this.beginThinking();
 			changed = true;
 		} else if (ame.type === "thinking_end") {
@@ -714,13 +997,65 @@ export class SpinnerController {
 	}
 
 	public handleMessageEnd(event: MessageEndEvent, ctx: UiCtx): void {
-		if (!event || typeof event !== "object" || event.message?.role !== "assistant") return;
+		if (
+			!event ||
+			typeof event !== "object" ||
+			event.message?.role !== "assistant"
+		)
+			return;
 		const msg = event.message;
-		const usage = msg && typeof msg === "object" && "usage" in msg && msg.usage && typeof msg.usage === "object" ? msg.usage : undefined;
+		const usage =
+			msg &&
+			typeof msg === "object" &&
+			"usage" in msg &&
+			msg.usage &&
+			typeof msg.usage === "object"
+				? msg.usage
+				: undefined;
 		const out = usage?.output;
-		const finalTokens = typeof out === "number" && Number.isFinite(out) && !Number.isNaN(out) && out >= 0 ? Math.floor(out) : this.streamTokens;
+		const finalTokens =
+			typeof out === "number" &&
+			Number.isFinite(out) &&
+			!Number.isNaN(out) &&
+			out >= 0
+				? Math.floor(out)
+				: this.streamTokens;
 		this.settledTokens += finalTokens;
 		this.streamTokens = 0;
+
+		if (!this.sawToolCall) {
+			this.sawToolCall =
+				Array.isArray(msg?.content) &&
+				msg.content.some((b: any) => b?.type === "toolCall");
+		}
+		if (this.contentStreamStart !== null && this.contentCharacters > 0) {
+			const streamEnd = this.lastContentDeltaAt ?? this.contentStreamStart;
+			const streamMs = streamEnd - this.contentStreamStart;
+			const estimatedFirstDeltaTokens = Math.ceil(
+				this.firstContentDeltaCharacters / 4,
+			);
+			const streamedTokens =
+				!this.sawToolCall && typeof out === "number" && out > 0
+					? Math.max(0, out - estimatedFirstDeltaTokens)
+					: Math.max(
+							0,
+							Math.ceil(this.contentCharacters / 4) - estimatedFirstDeltaTokens,
+						);
+
+			if (this.contentDeltaCount >= 2 && streamMs >= 50 && streamedTokens > 0) {
+				this.runContentTokens += streamedTokens;
+				this.runContentStreamMs += streamMs;
+				this.currentTps = this.runContentTokens / (this.runContentStreamMs / 1000);
+			}
+		}
+
+		this.contentStreamStart = null;
+		this.lastContentDeltaAt = null;
+		this.contentCharacters = 0;
+		this.firstContentDeltaCharacters = 0;
+		this.contentDeltaCount = 0;
+		this.sawToolCall = false;
+
 		this.settleThinking();
 		if (ctx?.hasUI && this.timer !== null) {
 			this.scheduleRepaint(ctx);
@@ -732,6 +1067,7 @@ export class SpinnerController {
 	}
 
 	public handleAgentSettled(ctx: UiCtx): void {
+		this.currentTps = null;
 		this.stopLoop();
 		this.clearThinkingTimers();
 		this.clearRepaintTimer();
