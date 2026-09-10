@@ -16,7 +16,11 @@
     "@earendil-works/pi-agent-core": "*",
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-tui": "*",
+    "diff": "*",
     "typebox": "*"
+  },
+  "dependencies": {
+    "diff": "^8.0.4"
   },
   "pi": {
     "extensions": [
