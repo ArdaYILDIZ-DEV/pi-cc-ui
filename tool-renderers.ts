@@ -33,6 +33,7 @@ import {
 	ToolExecutionComponent,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { ClaudeDiffComponent } from "./claude-diff.ts";
 
 const MAX_SUMMARY_CHARS = 120;
 const MAX_EXPANDED_LINES = 30;
@@ -398,8 +399,20 @@ export function registerClaudeToolRenderers(
 				renderCall: (args, theme, context) =>
 					renderCall("Edit", (args as { path?: string }).path ?? "", theme, context),
 				renderResult(result, options, theme, context) {
-					if (options.expanded && tool.renderResult)
+					if (context.isError) {
+						return renderResult(result, options, theme, context, () => "Failed");
+					}
+					const diff = (result.details as { diff?: unknown } | undefined)?.diff;
+					if (typeof diff === "string" && diff.trim().length > 0) {
+						const editArgs = context.args as
+							| { path?: string; file_path?: string }
+							| undefined;
+						const path = editArgs?.path ?? editArgs?.file_path ?? "";
+						return new ClaudeDiffComponent(diff, path, theme);
+					}
+					if (options.expanded && tool.renderResult) {
 						return tool.renderResult(result, options, theme, context);
+					}
 					return renderResult(result, options, theme, context, () => "Updated");
 				},
 			});

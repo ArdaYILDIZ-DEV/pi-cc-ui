@@ -36,7 +36,8 @@ export function hexToRgb(hex: string): Rgb {
 	if (typeof hex !== "string" || hex.length === 0) return { r: 0, g: 0, b: 0 };
 	const start = hex.charCodeAt(0) === 35 ? 1 : 0; // 35 is '#'
 	const cleanHex = start === 1 ? hex.slice(1) : hex;
-	if (cleanHex.length !== 3 && cleanHex.length !== 6) return { r: 0, g: 0, b: 0 };
+	if (cleanHex.length !== 3 && cleanHex.length !== 6)
+		return { r: 0, g: 0, b: 0 };
 
 	// Validate hex characters strictly [0-9a-fA-F]
 	for (let i = 0; i < cleanHex.length; i++) {
@@ -73,9 +74,13 @@ export function hexToRgb(hex: string): Rgb {
  * Maps 24-bit RGB values to the nearest xterm 256-color index.
  */
 export function rgbTo256(r: number, g: number, b: number): number {
-	const cr = typeof r === "number" && Number.isFinite(r) ? Math.max(0, Math.min(255, Math.floor(r))) : 0;
-	const cg = typeof g === "number" && Number.isFinite(g) ? Math.max(0, Math.min(255, Math.floor(g))) : 0;
-	const cb = typeof b === "number" && Number.isFinite(b) ? Math.max(0, Math.min(255, Math.floor(b))) : 0;
+	const clampByte = (v: number): number =>
+		typeof v === "number" && Number.isFinite(v)
+			? Math.max(0, Math.min(255, Math.floor(v)))
+			: 0;
+	const cr = clampByte(r);
+	const cg = clampByte(g);
+	const cb = clampByte(b);
 
 	// Grayscale ramp check (232-255)
 	if (cr === cg && cg === cb) {
@@ -183,11 +188,13 @@ export const CONTROL_CHARS_REGEX = /[\x00-\x1f\x7f-\x9f]/g;
 
 // Regex for stripping unsafe control characters and non-SGR escapes while preserving safe SGR sequences (\x1b[...m)
 const NON_SGR_ANSI_OR_UNSAFE_CONTROLS =
-	/(?:\x1b\[|\x9b)[\x30-\x3f]*[\x20-\x2f]*[@-ln-~]|(?:\x1b\]|\x9d)[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c|$)|(?:\x1b[PX^_]|[\x90\x98\x9e\x9f])[^\x1b\x9c\x07]*(?:\x1b\\|\x9c|\x07|$)|(?:\x1b[()#%*+\-./][^\x1b\x07]?|\x1b[A-Za-z0-9=@<>])|[\x00-\x1a\x1c-\x1f\x7f-\x9f]|\x1b(?![\[0-9;]*m)/g;
+	/(?:\x1b\[|\x9b)[\x30-\x3f]*[\x20-\x2f]*[@-ln-~]|(?:\x1b\]|\x9d)[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c|$)|(?:\x1b[PX^_]|[\x90\x98\x9e\x9f])[^\x1b\x9c\x07]*(?:\x1b\\|\x9c|\x07|$)|(?:\x1b[()#%*+\-./][^\x1b\x07]?|\x1b[A-Za-z0-9=@<>])|[\x00-\x1a\x1c-\x1f\x7f-\x9f]|\x1b(?![[0-9;]*m)/g;
 
 // Precomputed 256-color number ANSI escape sequences (0-255)
-const ANSI_256_NUMBERS: readonly string[] = Array.from({ length: 256 }, (_, i) =>
-	i < 8 ? `\x1b[${30 + i}m` : i < 16 ? `\x1b[${82 + i}m` : `\x1b[38;5;${i}m`,
+const ANSI_256_NUMBERS: readonly string[] = Array.from(
+	{ length: 256 },
+	(_, i) =>
+		i < 8 ? `\x1b[${30 + i}m` : i < 16 ? `\x1b[${82 + i}m` : `\x1b[38;5;${i}m`,
 );
 
 // Bounded fast ANSI cache for hot-path colors
@@ -202,6 +209,8 @@ function preseedPalette(palette: CcPalette): void {
 			const { r, g, b } = hexToRgb(val);
 			ANSI_CACHE.set(`truecolor:${val}`, `\x1b[38;2;${r};${g};${b}m`);
 			ANSI_CACHE.set(`256color:${val}`, `\x1b[38;5;${rgbTo256(r, g, b)}m`);
+			ANSI_CACHE.set(`bg:truecolor:${val}`, `\x1b[48;2;${r};${g};${b}m`);
+			ANSI_CACHE.set(`bg:256color:${val}`, `\x1b[48;5;${rgbTo256(r, g, b)}m`);
 		}
 	}
 }
@@ -314,7 +323,10 @@ export function visibleWidth(str: string): number {
 
 		// 3. Fast path for common Unicode symbols, punctuation, arrows (0x2000..0x2e7f)
 		if (code >= 0x2000 && code < 0x2e80) {
-			if ((code >= 0x200b && code <= 0x200f) || (code >= 0x20d0 && code <= 0x20ff)) {
+			if (
+				(code >= 0x200b && code <= 0x200f) ||
+				(code >= 0x20d0 && code <= 0x20ff)
+			) {
 				continue;
 			}
 			if (code === 0x2329 || code === 0x232a) {
@@ -403,7 +415,13 @@ export function visibleWidth(str: string): number {
 		}
 
 		// 8-bit OSC (\x9d) / DCS (\x90) / APC (\x9f) / PM (\x9e) / SOS (\x98)
-		if (code === 0x9d || code === 0x90 || code === 0x98 || code === 0x9e || code === 0x9f) {
+		if (
+			code === 0x9d ||
+			code === 0x90 ||
+			code === 0x98 ||
+			code === 0x9e ||
+			code === 0x9f
+		) {
 			i += 1;
 			while (i < len) {
 				const c = str.charCodeAt(i);
@@ -464,11 +482,14 @@ export function visibleWidth(str: string): number {
 	return width;
 }
 
-export function fgAnsi(color: ColorValue, mode: ColorMode = "truecolor"): string {
+export function fgAnsi(
+	color: ColorValue,
+	mode: ColorMode = "truecolor",
+): string {
 	if (typeof color !== "string" && typeof color !== "number") return FG_DEFAULT;
 
 	if (typeof color === "number") {
-		if (!Number.isFinite(color) || Number.isNaN(color) || color < 0 || color > 255) {
+		if (!Number.isFinite(color) || color < 0 || color > 255) {
 			return FG_DEFAULT;
 		}
 		return ANSI_256_NUMBERS[Math.floor(color)] ?? FG_DEFAULT;
@@ -502,9 +523,67 @@ export function fgAnsi(color: ColorValue, mode: ColorMode = "truecolor"): string
 	return ansi;
 }
 
-export function fg(color: ColorValue, text: string, mode: ColorMode = "truecolor"): string {
+export function fg(
+	color: ColorValue,
+	text: string,
+	mode: ColorMode = "truecolor",
+): string {
 	if (typeof text !== "string" || text === "") return "";
 	return `${fgAnsi(color, mode)}${text}${FG_DEFAULT}`;
+}
+
+export function bgAnsi(
+	color: ColorValue,
+	mode: ColorMode = "truecolor",
+): string {
+	if (typeof color !== "string" && typeof color !== "number") return BG_DEFAULT;
+
+	if (typeof color === "number") {
+		if (
+			!Number.isFinite(color) ||
+			Number.isNaN(color) ||
+			color < 0 ||
+			color > 255
+		) {
+			return BG_DEFAULT;
+		}
+		return `\x1b[48;5;${Math.floor(color)}m`;
+	}
+
+	if (!isValidHex(color)) {
+		return BG_DEFAULT;
+	}
+
+	const safeMode = mode === "256color" ? "256color" : "truecolor";
+	const cacheKey = `bg:${safeMode}:${color}`;
+	const hit = ANSI_CACHE.get(cacheKey);
+	if (hit !== undefined) return hit;
+
+	const { r, g, b } = hexToRgb(color);
+	let ansi: string;
+	if (safeMode === "256color") {
+		const c256 = rgbTo256(r, g, b);
+		ansi = `\x1b[48;5;${c256}m`;
+	} else {
+		ansi = `\x1b[48;2;${r};${g};${b}m`;
+	}
+
+	if (ANSI_CACHE.size >= MAX_ANSI_CACHE_SIZE) {
+		ANSI_CACHE.clear();
+		preseedPalette(CLAUDE_CODE_DARK_PALETTE);
+		preseedPalette(CLAUDE_CODE_LIGHT_PALETTE);
+	}
+	ANSI_CACHE.set(cacheKey, ansi);
+	return ansi;
+}
+
+export function bg(
+	color: ColorValue,
+	text: string,
+	mode: ColorMode = "truecolor",
+): string {
+	if (typeof text !== "string" || text === "") return "";
+	return `${bgAnsi(color, mode)}${text}${BG_DEFAULT}`;
 }
 
 export interface ResolvedPalette {
@@ -521,7 +600,9 @@ export function resolvePalette(
 	themeName?: string,
 	_tokenFg?: (token: string) => string | undefined,
 ): ResolvedPalette {
-	const isLight = typeof themeName === "string" && /light|latte|day|dawn|white/i.test(themeName);
+	const isLight =
+		typeof themeName === "string" &&
+		/light|latte|day|dawn|white/i.test(themeName);
 	return {
 		cc: isLight ? CLAUDE_CODE_LIGHT_PALETTE : CLAUDE_CODE_DARK_PALETTE,
 		scheme: isLight ? "light" : "dark",

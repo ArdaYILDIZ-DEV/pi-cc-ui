@@ -230,6 +230,63 @@ describe("registerClaudeToolRenderers (builtin official path)", () => {
 		const resultLines = resultComp.render(80).join("\n");
 		assert.ok(resultLines.includes("Returned 2 lines"));
 	});
+
+	it("edit renderer produces ClaudeDiffComponent when diff is present", () => {
+		const { pi, registered } = createMockPi(["edit"]);
+		registerClaudeToolRenderers(pi, "/tmp");
+		const theme = createMockTheme();
+		const edit = registered.find((r) => r.name === "edit");
+		assert.ok(edit);
+		const editDef = edit!.def as {
+			renderCall: (args: unknown, theme: Theme, ctx: unknown) => Text;
+			renderResult: (r: unknown, o: unknown, t: Theme, c: unknown) => unknown;
+		};
+
+		// renderCall produces Edit(path)
+		const callComp = editDef.renderCall({ path: "src/server.ts" }, theme, {
+			executionStarted: true,
+			isError: false,
+			isPartial: false,
+		});
+		assert.ok(callComp.render(80).join("\n").includes("Edit"));
+
+		// renderResult with diff produces ClaudeDiffComponent directly
+		const diffText = "+ 1 const x = 1;\n- 1 const x = 0;";
+		const resultComp = editDef.renderResult(
+			{
+				content: [{ type: "text", text: "Successfully replaced" }],
+				details: { diff: diffText },
+			},
+			{ expanded: false, isPartial: false },
+			theme,
+			{
+				args: { path: "src/server.ts" },
+				executionStarted: true,
+				isError: false,
+				isPartial: false,
+			},
+		) as { render: (width: number) => string[] };
+
+		assert.ok(typeof resultComp.render === "function");
+		const renderedLines = resultComp.render(80);
+		assert.ok(renderedLines.length >= 2);
+		assert.match(renderedLines[0]!, /1 \+ /);
+		assert.match(renderedLines[1]!, /1 - /);
+
+		// Error case renders error message in red
+		const errorComp = editDef.renderResult(
+			{ content: [{ type: "text", text: "File not found" }] },
+			{ expanded: false, isPartial: false },
+			theme,
+			{
+				args: { path: "src/server.ts" },
+				executionStarted: true,
+				isError: true,
+				isPartial: false,
+			},
+		) as { render: (width: number) => string[] };
+		assert.ok(errorComp.render(80).join("\n").includes("File not found"));
+	});
 });
 
 describe("global patch (generic tools)", () => {
