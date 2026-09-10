@@ -2,7 +2,7 @@
   <strong>Claude Code spinner with live token rate, 5-minute prompt cache TTL counter with git status, and compact tool renderers for Pi.</strong><br>
   <img src="https://img.shields.io/badge/node-%3E%3D22-blue?style=flat-square" alt="Node.js 22+">
   <img src="https://img.shields.io/badge/typescript-7.0%2B-blue?style=flat-square" alt="TypeScript 7.0+">
-  <img src="https://img.shields.io/badge/tests-172%20passed-green?style=flat-square" alt="172 tests passed">
+  <img src="https://img.shields.io/badge/tests-187%20passed-green?style=flat-square" alt="187 tests passed">
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT License">
 </p>
 
@@ -35,7 +35,7 @@ Pi will load and activate the extension on its next start or reload.
   - 4.30. dakika: `4.mp3` (2 kez)
 - **Slash command:** `/cache` displays exact elapsed/remaining time; `/cache toggle` shows or hides the counter; `/cache sound` toggles sound alerts; `/cache sound test` plays a test sound.
 - **Git commands:** `/git` shows repository status, branch, and open PR; `/git refresh` forces an immediate background update.
-- **Compact tool renderers:** Every tool (builtin and custom) renders as `● Label(detail)` with a one-line `└ summary`; the full output stays available via expand. Toggle dynamically without restart.
+- **Compact tool renderers & Claude diff:** Every tool renders as `● Label(detail)` with a one-line `└ summary`. The `edit` tool features full Claude Code diff styling with full-width green/red backgrounds, token-level intra-line word diffs, `<lineNum> <sign> <code>` gutter layout, and syntax highlighting. Toggle dynamically with `/cc-tools`.
 
 ## Commands
 
@@ -55,6 +55,7 @@ Pi will load and activate the extension on its next start or reload.
 ```text
 .
 ├── cache-timer.ts          # 5-minute prompt cache TTL widget with git status integration (below editor)
+├── claude-diff.ts          # Claude Code style diff parser, syntax highlighter, and TUI component
 ├── git-info.ts             # zero-dependency git repository & pull request tracker
 ├── index.ts                # extension entry point registering spinner, git info, cache timer, and tool renderers
 ├── package.json            # package configuration and test script
@@ -62,7 +63,7 @@ Pi will load and activate the extension on its next start or reload.
 ├── README.md               # project documentation
 ├── sounds                  # prompt cache warning audio files (3.mp3, 4.mp3)
 ├── spinner.ts              # 20fps CC spinner loop, glimmer sweep, Turkish action verbs, and live tok/s
-├── tests                   # 172 unit, lifecycle, performance, and security tests
+├── tests                   # 187 unit, lifecycle, performance, and security tests
 ├── tool-renderers.ts       # Claude-style compact renderers for builtin + custom tools (`/cc-tools`)
 └── tsconfig.json           # TypeScript configuration
 ```
