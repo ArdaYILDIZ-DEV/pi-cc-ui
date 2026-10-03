@@ -18,7 +18,7 @@ import type {
 	ThemeColor,
 	TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import * as PiTui from "@earendil-works/pi-tui";
 import {
 	type ColorMode,
 	type Rgb,
@@ -29,6 +29,40 @@ import {
 	sanitizeControlChars,
 	stripAnsi,
 } from "./palette.ts";
+import { notifySafely } from "./pi-compat.ts";
+
+let truncationWarningLogged = false;
+
+function warnTruncationFallback(error?: unknown): void {
+	if (truncationWarningLogged) return;
+	truncationWarningLogged = true;
+	console.warn("[cc-ui] Pi text truncation unavailable; using plain text.", error);
+}
+
+function truncateToWidth(text: string, width: number): string {
+	if (typeof PiTui.truncateToWidth === "function") {
+		try {
+			const truncated = PiTui.truncateToWidth(text, width);
+			if (typeof truncated === "string") return truncated;
+			warnTruncationFallback();
+		} catch (error) {
+			warnTruncationFallback(error);
+		}
+	} else {
+		warnTruncationFallback();
+	}
+
+	const maxWidth = Math.max(0, Math.floor(width));
+	let output = "";
+	let usedWidth = 0;
+	for (const character of stripAnsi(text)) {
+		const characterWidth = visibleWidth(character);
+		if (usedWidth + characterWidth > maxWidth) break;
+		output += character;
+		usedWidth += characterWidth;
+	}
+	return output;
+}
 
 export const DEFAULT_CACHE_TTL_MS = 300_000; // 5 minutes = 300 seconds
 
@@ -1000,7 +1034,7 @@ export function registerCacheTimer(
 			const clean = sanitizeControlChars(stripAnsi(args)).trim().toLowerCase();
 			if (clean === "toggle") {
 				const visible = controller.toggleVisibility(ctx);
-				ctx.ui.notify(`Önbellek sayacı: ${visible ? "açık" : "kapalı"}`, "info");
+				notifySafely(ctx, `Önbellek sayacı: ${visible ? "açık" : "kapalı"}`, "info");
 				return;
 			}
 			if (
@@ -1010,7 +1044,8 @@ export function registerCacheTimer(
 				clean === "ses toggle"
 			) {
 				const enabled = controller.toggleSound();
-				ctx.ui.notify(
+				notifySafely(
+					ctx,
 					`Önbellek sesli uyarıları: ${enabled ? "açık" : "kapalı"}`,
 					"info",
 				);
@@ -1018,12 +1053,12 @@ export function registerCacheTimer(
 			}
 			if (clean === "sound on" || clean === "ses aç") {
 				controller.setSoundEnabled(true);
-				ctx.ui.notify("Önbellek sesli uyarıları: açık", "info");
+				notifySafely(ctx, "Önbellek sesli uyarıları: açık", "info");
 				return;
 			}
 			if (clean === "sound off" || clean === "ses kapat") {
 				controller.setSoundEnabled(false);
-				ctx.ui.notify("Önbellek sesli uyarıları: kapalı", "info");
+				notifySafely(ctx, "Önbellek sesli uyarıları: kapalı", "info");
 				return;
 			}
 			if (
@@ -1032,13 +1067,14 @@ export function registerCacheTimer(
 				clean === "test sound"
 			) {
 				controller.playMilestoneSound("3.mp3", 1);
-				ctx.ui.notify(
+				notifySafely(
+					ctx,
 					"Ses testi: 3.mp3 çalınıyor. Ses gelmiyorsa oynatıcıyı (mpv/ffplay) ve ses çıkışını kontrol et.",
 					"info",
 				);
 				return;
 			}
-			ctx.ui.notify(controller.getStatusSummary(), "info");
+			notifySafely(ctx, controller.getStatusSummary(), "info");
 		},
 	});
 

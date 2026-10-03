@@ -17,7 +17,18 @@
  * When an original custom renderer exists it is preserved for the expanded
  * view (`to expand`); the collapsed view always uses the compact summary.
  */
-import {
+import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ToolDefinition,
+	Theme,
+} from "@earendil-works/pi-coding-agent";
+import * as PiTui from "@earendil-works/pi-tui";
+import type { Text } from "@earendil-works/pi-tui";
+import { notifySafely } from "./pi-compat.ts";
+import { ClaudeDiffComponent } from "./claude-diff.ts";
+
+const {
 	createBashToolDefinition,
 	createEditToolDefinition,
 	createFindToolDefinition,
@@ -26,17 +37,17 @@ import {
 	createPowerShellToolDefinition,
 	createReadToolDefinition,
 	createWriteToolDefinition,
-	type ExtensionAPI,
-	type ToolDefinition,
-	keyHint,
-	type Theme,
-	ToolExecutionComponent,
-} from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
-import { ClaudeDiffComponent } from "./claude-diff.ts";
+} = PiCodingAgent;
 
 const MAX_SUMMARY_CHARS = 120;
 const MAX_EXPANDED_LINES = 30;
+let piCompatibilityWarningLogged = false;
+
+function warnPiCompatibility(feature: string): void {
+	if (piCompatibilityWarningLogged) return;
+	piCompatibilityWarningLogged = true;
+	console.warn(`[cc-ui] Pi ${feature} unavailable; using built-in renderers.`);
+}
 
 type RenderContext = {
 	executionStarted: boolean;
@@ -121,7 +132,7 @@ function renderCall(
 	if (context.isError) dotColor = "error";
 	else if (context.executionStarted && !context.isPartial) dotColor = "success";
 	const suffix = detail ? theme.fg("muted", `(${singleLine(detail)})`) : "";
-	return new Text(
+	return new PiTui.Text(
 		`${theme.fg(dotColor, "●")} ${theme.fg("toolTitle", theme.bold(safeLabel))}${suffix}`,
 		1,
 		0,
@@ -138,7 +149,7 @@ function renderResult(
 	const output = resultText(result);
 	if (options.isPartial) {
 		const progress = singleLine(output) || "Working…";
-		return new Text(theme.fg("dim", `  └ ${progress}`), 1, 0);
+		return new PiTui.Text(theme.fg("dim", `  └ ${progress}`), 1, 0);
 	}
 
 	const isError = context.isError;
@@ -147,7 +158,11 @@ function renderResult(
 	let text = theme.fg(color, `  └ ${status}${truncationSuffix(result.details)}`);
 
 	if (output && !options.expanded) {
-		text += theme.fg("dim", ` ${keyHint("app.tools.expand", "to expand")}`);
+		const hint =
+			typeof PiCodingAgent.keyHint === "function"
+				? PiCodingAgent.keyHint("app.tools.expand", "to expand")
+				: "to expand";
+		text += theme.fg("dim", ` ${hint}`);
 	} else if (output && options.expanded) {
 		const lines = output.split("\n");
 		for (const line of lines.slice(0, MAX_EXPANDED_LINES)) {
@@ -157,7 +172,7 @@ function renderResult(
 			text += `\n${theme.fg("dim", `    … ${lines.length - MAX_EXPANDED_LINES} more lines`)}`;
 		}
 	}
-	return new Text(text, 1, 0);
+	return new PiTui.Text(text, 1, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -306,6 +321,10 @@ export function registerClaudeToolRenderers(
 	cwd: string,
 ): string[] {
 	const wrapped: string[] = [];
+	if (typeof PiTui.Text !== "function") {
+		warnPiCompatibility("Text component");
+		return wrapped;
+	}
 	const piOwnedTools = new Set(getWrappableBuiltins(pi));
 
 	const safeCwd = typeof cwd === "string" && cwd ? cwd : process.cwd();
@@ -626,10 +645,14 @@ function getPatchTarget(): PatchedProto | null {
 		// SAFETY: ToolExecutionComponent is an exported Pi class whose prototype shape
 		// is not in its public d.ts (private render methods); we only read the
 		// prototype object to install a best-effort UI fallback, never to change types.
-		const proto = (
-			ToolExecutionComponent as unknown as { prototype?: PatchedProto }
-		).prototype;
-		if (!proto || typeof proto !== "object") return null;
+		const component = PiCodingAgent.ToolExecutionComponent as
+			| { prototype?: PatchedProto }
+			| undefined;
+		const proto = component?.prototype;
+		if (!proto || typeof proto !== "object") {
+			warnPiCompatibility("tool renderer component");
+			return null;
+		}
 		return proto;
 	} catch {
 		return null;
@@ -678,6 +701,10 @@ export type ClaudeResultRenderer = (
  * internals are unavailable (patch skipped, builtin path still works).
  */
 export function installGlobalClaudeToolPatch(): boolean {
+	if (typeof PiTui.Text !== "function") {
+		warnPiCompatibility("Text component");
+		return false;
+	}
 	const proto = getPatchTarget();
 	if (!proto) return false;
 	if (proto.__ccUiToolPatchInstalled) return true;
@@ -693,6 +720,7 @@ export function installGlobalClaudeToolPatch(): boolean {
 			typeof origGetResult !== "function" ||
 			typeof origGetShell !== "function"
 		) {
+			warnPiCompatibility("tool renderer prototype methods");
 			return false;
 		}
 
@@ -855,7 +883,7 @@ export function installGlobalClaudeToolPatch(): boolean {
 						Array.isArray((result as TextResult)?.content) &&
 						(result as TextResult).content.some((item) => item?.type === "image");
 					if (hasImage && !options?.expanded) {
-						return new Text(
+						return new PiTui.Text(
 							theme.fg("dim", "  └ Image result (expand to view)"),
 							1,
 							0,
@@ -925,7 +953,7 @@ export function registerToolRenderers(pi: ExtensionAPI): void {
 			const clean = (typeof args === "string" ? args : "").trim().toLowerCase();
 			if (clean === "on" || clean === "ac" || clean === "aç") {
 				setClaudeToolsEnabled(pi, true, ctx.cwd);
-				ctx.ui.notify("Claude tool görünümü: açık", "info");
+				notifySafely(ctx, "Claude tool görünümü: açık", "info");
 				return;
 			}
 			if (
@@ -935,16 +963,17 @@ export function registerToolRenderers(pi: ExtensionAPI): void {
 				clean === "kapalı"
 			) {
 				setClaudeToolsEnabled(pi, false, ctx.cwd);
-				ctx.ui.notify("Claude tool görünümü: kapalı", "info");
+				notifySafely(ctx, "Claude tool görünümü: kapalı", "info");
 				return;
 			}
 			if (clean === "toggle") {
 				const next = !isClaudeToolsEnabled();
 				setClaudeToolsEnabled(pi, next, ctx.cwd);
-				ctx.ui.notify(`Claude tool görünümü: ${next ? "açık" : "kapalı"}`, "info");
+				notifySafely(ctx, `Claude tool görünümü: ${next ? "açık" : "kapalı"}`, "info");
 				return;
 			}
-			ctx.ui.notify(
+			notifySafely(
+				ctx,
 				`Claude tool görünümü: ${isClaudeToolsEnabled() ? "açık" : "kapalı"} ` +
 					`(${wrappableBuiltinNames.size} builtin + tüm özel araçlar). ` +
 					`Kullanım: cc-tools on/off/toggle.`,

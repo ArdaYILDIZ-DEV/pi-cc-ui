@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import * as Diff from "diff";
+import { diffWords } from "../word-diff.ts";
 import {
 	applyIntraLineBg,
 	ClaudeDiffComponent,
@@ -78,7 +78,7 @@ describe("claude-diff parser and helpers", () => {
 		it("calculates accurate character ranges for word changes", () => {
 			const oldL = "const filePath = path.join(__dirname, filename);";
 			const newL = "const filePath = path.join(uploadsDir, filename);";
-			const parts = Diff.diffWords(oldL, newL);
+			const parts = diffWords(oldL, newL);
 
 			const newRanges = getWordRanges(parts, true);
 			assert.equal(newRanges.length, 1);
@@ -112,7 +112,7 @@ describe("claude-diff parser and helpers", () => {
 		it("applies intra-line background code around changed word token", () => {
 			const oldL = "let a = 1;";
 			const newL = "let a = 2;";
-			const parts = Diff.diffWords(oldL, newL);
+			const parts = diffWords(oldL, newL);
 			const baseBg = "\x1b[48;2;10;40;10m";
 			const wordBg = "\x1b[48;2;30;80;30m";
 

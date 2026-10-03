@@ -1,6 +1,6 @@
 /**
  * cc-ui — Claude Code UI extension for Pi.
- * Provides the official 20fps CC spinner glyph animation (· ✢ ✳ ✶ ✻ ✽), dynamic action verbs,
+ * Provides a compact CC-style spinner (· ✢ ✳ ✶ ✻ ✽), dynamic action verbs,
  * live tokens/sec streaming rate, 5-minute Prompt Cache TTL counter widget with git branch status,
  * and compact Claude-style renderers (● Label(detail) / └ summary) for every tool.
  */
@@ -43,14 +43,32 @@ export {
 	addAssistantResponseMarker,
 } from "./tool-renderers.ts";
 
+function registerSafely<T>(feature: string, register: () => T): T | undefined {
+	try {
+		return register();
+	} catch (error) {
+		console.error(`[cc-ui] ${feature} disabled during Pi API setup.`, error);
+		return undefined;
+	}
+}
+
 export default function (pi: ExtensionAPI): void {
-	registerSpinner(pi);
-	const gitController = registerGitInfo(pi);
-	const cacheController = registerCacheTimer(pi, {
-		gitInfoProvider: () => formatGitSummary(gitController.getState()),
-	});
-	gitController.addListener((state) => {
-		cacheController.setGitInfoProvider(() => formatGitSummary(state));
-	});
-	registerToolRenderers(pi);
+	registerSafely("Spinner", () => registerSpinner(pi));
+	const gitController = registerSafely("Git status", () => registerGitInfo(pi));
+	const cacheController = registerSafely("Cache timer", () =>
+		registerCacheTimer(
+			pi,
+			gitController
+				? { gitInfoProvider: () => formatGitSummary(gitController.getState()) }
+				: undefined,
+		),
+	);
+	if (gitController && cacheController) {
+		registerSafely("Git/cache integration", () =>
+			gitController.addListener((state) => {
+				cacheController.setGitInfoProvider(() => formatGitSummary(state));
+			}),
+		);
+	}
+	registerSafely("Tool renderers", () => registerToolRenderers(pi));
 }

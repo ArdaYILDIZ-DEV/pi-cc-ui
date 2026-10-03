@@ -194,6 +194,20 @@ describe("spinner", () => {
 			assert.equal(visibleWidth(line), 13); // glyph (1) + space (1) + Kodlanıyor… (11)
 		});
 
+		it("uses a steady accent verb and simple dim thinking status", () => {
+			const line = buildSpinnerLine(
+				{
+					verb: "Düşünülüyor",
+					timeMs: 5000,
+					columns: 120,
+					thinkingStatus: "thinking",
+				},
+				mockPaint,
+			);
+			assert.ok(!line.includes("\\x1b[38;2;235;159;127m"));
+			assert.ok(line.includes(mockPaint.dim("düşünülüyor")));
+		});
+
 		it("falls back to default verb when empty verb is provided", () => {
 			const state: SpinnerFrameState = {
 				verb: "",

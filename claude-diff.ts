@@ -4,25 +4,53 @@
  * Renders diffs with:
  * - Line numbers and signs: `<lineNum> <sign> <code>` (e.g. `60 + `, `54 - `, `61   `)
  * - Full-width solid backgrounds (dark green `#0d3516` for added, dark red `#420c10` for removed)
- * - Intra-line token diffing via `Diff.diffWords` with highlighted word backgrounds
+ * - Bounded, dependency-free intra-line token diffing with highlighted word backgrounds
  * - Syntax highlighting via Pi theme & highlightCode
  * - Responsive terminal width padding and line wrapping with continuation gutter
  */
 
-import {
-	getLanguageFromPath,
-	highlightCode,
-	type Theme,
-} from "@earendil-works/pi-coding-agent";
-import { visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import * as Diff from "diff";
+import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
+import type { Theme } from "@earendil-works/pi-coding-agent";
+import * as PiTui from "@earendil-works/pi-tui";
+import { diffWords, type Change } from "./word-diff.ts";
 import {
 	bgAnsi,
 	fgAnsi,
 	FG_DEFAULT,
 	RESET,
 	resolvePalette,
+	visibleWidth as paletteVisibleWidth,
 } from "./palette.ts";
+
+const visibleWidth = paletteVisibleWidth;
+let compatibilityWarningLogged = false;
+
+function warnCompatibilityFallback(feature: string, error?: unknown): void {
+	if (compatibilityWarningLogged) return;
+	compatibilityWarningLogged = true;
+	console.warn(`[cc-ui] Pi ${feature} unavailable; diff rendering is simplified.`, error);
+}
+
+function wrapTextWithAnsi(text: string, width: number): string[] {
+	if (typeof PiTui.wrapTextWithAnsi === "function") {
+		try {
+			const wrapped = PiTui.wrapTextWithAnsi(text, width);
+			if (
+				Array.isArray(wrapped) &&
+				wrapped.length > 0 &&
+				wrapped.every((line) => typeof line === "string")
+			) {
+				return wrapped;
+			}
+			warnCompatibilityFallback("line wrapping API");
+		} catch (error) {
+			warnCompatibilityFallback("line wrapping API", error);
+		}
+	} else {
+		warnCompatibilityFallback("line wrapping API");
+	}
+	return [text];
+}
 
 export interface DiffLine {
 	readonly type: "added" | "removed" | "context" | "ellipsis";
@@ -30,7 +58,7 @@ export interface DiffLine {
 	readonly content: string;
 	readonly cleanContent: string;
 	highlighted: string;
-	wordParts?: Diff.Change[];
+	wordParts?: Change[];
 }
 
 export interface DiffThemeColors {
@@ -150,7 +178,7 @@ interface WordRange {
 }
 
 export function getWordRanges(
-	parts: Diff.Change[],
+	parts: Change[],
 	isAdded: boolean,
 ): WordRange[] {
 	const ranges: WordRange[] = [];
@@ -179,7 +207,7 @@ export function getWordRanges(
  */
 export function applyIntraLineBg(
 	highlightedLine: string,
-	parts: Diff.Change[],
+	parts: Change[],
 	isAdded: boolean,
 	baseBg: string,
 	wordBg: string,
@@ -249,7 +277,7 @@ export function pairIntraLineDiffs(lines: DiffLine[]): void {
 				i++;
 			}
 			if (removedList.length === 1 && addedList.length === 1) {
-				const parts = Diff.diffWords(
+				const parts = diffWords(
 					removedList[0]!.cleanContent,
 					addedList[0]!.cleanContent,
 				);
@@ -269,21 +297,32 @@ export function applySyntaxHighlighting(
 	lines: DiffLine[],
 	filePath?: string,
 ): void {
-	const lang = filePath ? getLanguageFromPath(filePath) : undefined;
+	let lang: string | undefined;
+	if (filePath && typeof PiCodingAgent.getLanguageFromPath === "function") {
+		try {
+			lang = PiCodingAgent.getLanguageFromPath(filePath);
+		} catch (error) {
+			warnCompatibilityFallback("language detection API", error);
+		}
+	} else if (filePath) {
+		warnCompatibilityFallback("language detection API");
+	}
 	for (const line of lines) {
 		if (line.type === "ellipsis") continue;
 		if (line.cleanContent.length === 0) {
 			line.highlighted = "";
 			continue;
 		}
-		if (lang) {
+		if (lang && typeof PiCodingAgent.highlightCode === "function") {
 			try {
-				const [hl] = highlightCode(line.cleanContent, lang);
+				const [hl] = PiCodingAgent.highlightCode(line.cleanContent, lang);
 				line.highlighted = hl ?? line.cleanContent;
-			} catch {
+			} catch (error) {
+				warnCompatibilityFallback("syntax highlighting API", error);
 				line.highlighted = line.cleanContent;
 			}
 		} else {
+			if (lang) warnCompatibilityFallback("syntax highlighting API");
 			line.highlighted = line.cleanContent;
 		}
 	}

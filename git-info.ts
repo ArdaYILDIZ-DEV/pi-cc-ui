@@ -11,6 +11,7 @@ import type {
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { sanitizeControlChars, stripAnsi } from "./palette.ts";
+import { notifySafely } from "./pi-compat.ts";
 
 export interface PullRequestInfo {
 	readonly number: number;
@@ -333,18 +334,18 @@ export function registerGitInfo(pi: ExtensionAPI): GitInfoController {
 			const clean = sanitizeControlChars(stripAnsi(args)).trim().toLowerCase();
 			if (clean === "refresh" || clean === "tazele") {
 				await controller.refresh(ctx?.cwd);
-				ctx.ui.notify("Git bilgileri güncellendi.", "info");
+				notifySafely(ctx, "Git bilgileri güncellendi.", "info");
 				return;
 			}
 
 			const state = controller.getState();
 			if (!state.isRepository) {
-				ctx.ui.notify("Mevcut dizin bir Git deposu değil.", "warning");
+				notifySafely(ctx, "Mevcut dizin bir Git deposu değil.", "warning");
 				return;
 			}
 
 			const summary = formatGitSummary(state, { includePr: true, language: "tr" });
-			ctx.ui.notify(`Git: ${summary}`, "info");
+			notifySafely(ctx, `Git: ${summary}`, "info");
 		},
 	});
 

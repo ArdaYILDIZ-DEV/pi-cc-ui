@@ -1,21 +1,10 @@
 /**
  * CC spinner status row, reproduced on pi's public APIs.
  *
- * CC's SpinnerAnimationRow (SpinnerAnimationRow.tsx) is a 20fps self-drawn row:
- * useAnimationFrame(50) drives the glyph frame (120ms), a glimmer sweep, the
- * elapsed-time + token byline (after 30s), and a thinking append. pi's built-in
- * Loader can do none of that — it bakes the glyph color once at
- * setWorkingIndicator time (AUDIT §5 spinner.ts:74 burn-in) and forces the verb
- * through messageColorFn = theme.fg("muted") (AUDIT §6: the verb should be
- * claude brand orange, not muted gray).
- *
- * So we do what the audit's feasibility note prescribes: hide the built-in
- * indicator with `frames: []` (pi loader.js:44,51 — empty frames ⇒ no glyph and
- * no internal timer) and repaint the whole line ourselves on a 50ms interval via
- * setWorkingMessage (pi interactive-mode.js:1878-1883 → StatusIndicator.setMessage
- * → Loader.updateDisplay → ui.requestRender, loader.js:38-41,59-67). Because the
- * line is rebuilt each tick from the live theme, a mid-session theme switch is
- * picked up immediately (no burn-in) and we own every color span.
+ * Uses Pi's extension UI to draw a concise status line: an animated glyph,
+ * action verb, and the available token/time details. It avoids extra shimmer
+ * effects and repaints only when the glyph frame changes. UI calls are guarded
+ * so teardown or a host API mismatch cannot take down the agent.
  */
 import type {
 	ExtensionAPI,
@@ -47,10 +36,8 @@ const FRAMES: readonly string[] = defaultCharacters();
 const SPINNER: readonly string[] = [...FRAMES, ...[...FRAMES].reverse()];
 // CC SpinnerAnimationRow.tsx:133 — frame = Math.floor(time / 120).
 const FRAME_MS = 120;
-// CC useAnimationFrame(50): the whole row is repainted at 20fps.
-const TICK_MS = 50;
-// CC SpinnerAnimationRow.tsx:135 — non-requesting glimmer cadence.
-const GLIMMER_MS = 200;
+// Repaint once per glyph frame; avoid redundant UI updates between frames.
+const TICK_MS = FRAME_MS;
 
 // Türkçe doğal, akıcı ve tek kelimelik eylem fiilleri
 const VERBS = [
@@ -234,10 +221,8 @@ export function formatElapsed(ms: number): string {
 }
 
 /**
- * The glimmer-swept verb. CC GlimmerMessage.tsx:103-141 — chars within ±1 of
- * `glimmerIndex` (a visual column that sweeps right→left) get the shimmer color,
- * the rest get the base (accent) color. When the sweep is offscreen the whole
- * message renders in the base color.
+ * Optional shimmer helper retained for callers that want the original effect;
+ * the default spinner row now uses a steady accent color.
  */
 export function glimmerMessage(
 	message: string,
@@ -359,8 +344,7 @@ export function thinkingWording(blockElapsedMs: number): string {
  * returns an ANSI string. Mirrors SpinnerAnimationRow's derivations for a
  * single (non-teammate) agent. Glyph and verb are painted in the accent
  * (claude brand) color every tick — no gray verb (AUDIT §6), no baked-in frame
- * color (AUDIT §5 spinner.ts:74) — with a glimmer sweep across the verb
- * (AUDIT §6, CC's most recognizable spinner effect).
+ * color with a steady accent verb and a simple dim byline.
  *
  * Width gating progressively degrades:
  * Full: [Glyph] [Verb] (Timer · Tokens · Thinking)
@@ -420,22 +404,16 @@ export function buildSpinnerLine(
 	if (cols === 2) return `${glyph} `;
 	if (cols === 3) return `${glyph} …`;
 
-	// Glimmer sweep cadence
-	const cycleLength = messageWidth + 20;
-	const cyclePosition = Math.floor(timeMs / GLIMMER_MS);
-	const glimmerIndex = messageWidth + 10 - (cyclePosition % cycleLength);
-
 	// Ultra-narrow: truncate verb stem to avoid terminal line wrapping when cols is bounded
 	if (cols > 0 && cols < 2 + messageWidth) {
 		const maxStemWidth = cols - 3;
 		const chars = Array.from(rawVerb);
 		const truncatedStem = chars.slice(0, Math.max(1, maxStemWidth)).join("");
 		const truncatedMessage = `${truncatedStem}…`;
-		const verbSpan = glimmerMessage(truncatedMessage, glimmerIndex, paint);
-		return `${glyph} ${verbSpan}`;
+		return `${glyph} ${paint.accent(truncatedMessage)}`;
 	}
 
-	const verbSpan = glimmerMessage(message, glimmerIndex, paint);
+	const verbSpan = paint.accent(message);
 	const availableSpace = cols > 0 ? cols - (2 + messageWidth) : -1;
 
 	// Space below 4 cannot fit any byline (` (x)` requires min 4 columns)
@@ -499,12 +477,7 @@ export function buildSpinnerLine(
 	const thinkFullW = thinkingFull ? visibleWidth(thinkingFull) : 0;
 	const thinkShortW = thinkingShort ? visibleWidth(thinkingShort) : 0;
 
-	const thinkingPaint =
-		status === "thinking"
-			? paint.thinking
-				? (s: string) => paint.thinking!(s, timeMs)
-				: thinkingGlowPaint(timeMs)
-			: paint.dim;
+	const thinkingPaint = paint.dim;
 
 	// Progressive degradation matrix according to available viewport width with direct formatting
 	if (
@@ -613,7 +586,7 @@ export function buildSpinnerLine(
 }
 
 // ---------------------------------------------------------------------------
-// Registration + the 50ms repaint loop
+// Registration + the frame-aligned repaint loop
 // ---------------------------------------------------------------------------
 
 /** CC getEffortSuffix (effort.ts:188-196): ` with ${level} effort`, "" when no
