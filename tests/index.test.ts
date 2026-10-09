@@ -1,9 +1,30 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { discoverAndLoadExtensions, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import extension from "../index.ts";
 
 describe("extension startup compatibility", () => {
+	it("loads through Pi's public loader without replacing registered tool execution", async () => {
+		const agentDir = await mkdtemp(path.join(tmpdir(), "arda-pi-ui-loader-"));
+		try {
+			const result = await discoverAndLoadExtensions([path.resolve("index.ts")], process.cwd(), agentDir);
+			assert.deepEqual(result.errors, []);
+			assert.equal(result.extensions.length, 1);
+			const loaded = result.extensions[0];
+			assert.equal(loaded.toolRenderers?.length, 1);
+			assert.equal(loaded.tools.size, 0);
+			assert.ok(loaded.commands.has("arda-tools"));
+			assert.ok(loaded.commands.has("cc-tools"));
+			assert.ok(loaded.handlers.has("agent_settled"));
+			assert.ok(loaded.handlers.has("session_shutdown"));
+		} finally {
+			await rm(agentDir, { recursive: true, force: true });
+		}
+	});
+
 	it("isolates Pi API registration failures to the affected features", () => {
 		const failures: string[] = [];
 		const originalError = console.error;
@@ -25,10 +46,11 @@ describe("extension startup compatibility", () => {
 		}
 
 		assert.deepEqual(failures, [
-			"[cc-ui] Spinner disabled during Pi API setup.",
-			"[cc-ui] Git status disabled during Pi API setup.",
-			"[cc-ui] Cache timer disabled during Pi API setup.",
-			"[cc-ui] Tool renderers disabled during Pi API setup.",
+			"[arda-pi-ui] Spinner disabled during Pi API setup.",
+			"[arda-pi-ui] Git status disabled during Pi API setup.",
+			"[arda-pi-ui] Cache timer disabled during Pi API setup.",
+			"[arda-pi-ui] Footer disabled during Pi API setup.",
+			"[arda-pi-ui] Tool renderers disabled during Pi API setup.",
 		]);
 	});
 });

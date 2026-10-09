@@ -28,7 +28,7 @@ let compatibilityWarningLogged = false;
 function warnCompatibilityFallback(feature: string, error?: unknown): void {
 	if (compatibilityWarningLogged) return;
 	compatibilityWarningLogged = true;
-	console.warn(`[cc-ui] Pi ${feature} unavailable; diff rendering is simplified.`, error);
+	console.warn(`[arda-pi-ui] Pi ${feature} unavailable; diff rendering is simplified.`, error);
 }
 
 function wrapTextWithAnsi(text: string, width: number): string[] {
@@ -331,7 +331,7 @@ export function applySyntaxHighlighting(
 /**
  * Renders Claude Code style diff lines from raw diff text.
  */
-export function renderClaudeDiffLines(
+export function renderToolDiffLines(
 	diffText: string,
 	filePath: string,
 	theme?: Theme | { name?: string },
@@ -344,17 +344,14 @@ export function renderClaudeDiffLines(
 	pairIntraLineDiffs(lines);
 
 	const colors = getDiffThemeColors(theme);
-	const targetWidth = Math.max(
-		20,
-		width ??
-			(typeof process !== "undefined" && process.stdout?.columns
-				? process.stdout.columns
-				: 80),
-	);
+	const rawWidth = width ??
+		(typeof process !== "undefined" && process.stdout?.columns ? process.stdout.columns : 80);
+	if (!Number.isFinite(rawWidth) || rawWidth < 1) return [];
+	const targetWidth = Math.floor(rawWidth);
 
 	const maxNumWidth = Math.max(1, String(maxLineNum).length);
 	const gutterWidth = maxNumWidth + 3; // "<num> <sign> "
-	const availCodeWidth = Math.max(10, targetWidth - gutterWidth);
+	const availCodeWidth = Math.max(1, targetWidth - gutterWidth);
 
 	const output: string[] = [];
 
@@ -433,23 +430,23 @@ export function renderClaudeDiffLines(
 		}
 	}
 
-	return output;
+	return output.map((line) => PiTui.truncateToWidth(line, targetWidth, ""));
 }
 
-/**
- * Pi TUI compatible Component that renders Claude Code style diffs.
- */
-export class ClaudeDiffComponent {
+/** Pi TUI diff component with optional self-rendered horizontal padding. */
+export class ToolDiffComponent {
 	readonly diffText: string;
 	readonly filePath: string;
 	readonly theme?: Theme;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
+	private readonly paddingX: number;
 
-	constructor(diffText: string, filePath: string, theme?: Theme) {
+	constructor(diffText: string, filePath: string, theme?: Theme, paddingX = 0) {
 		this.diffText = diffText;
 		this.filePath = filePath;
 		this.theme = theme;
+		this.paddingX = Number.isFinite(paddingX) ? Math.max(0, Math.floor(paddingX)) : 0;
 	}
 
 	invalidate(): void {
@@ -461,14 +458,19 @@ export class ClaudeDiffComponent {
 		if (this.cachedLines && this.cachedWidth === width) {
 			return this.cachedLines;
 		}
-		const lines = renderClaudeDiffLines(
+		const pad = Math.min(this.paddingX, Math.max(0, Math.floor((width - 1) / 2)));
+		const margin = " ".repeat(pad);
+		const lines = renderToolDiffLines(
 			this.diffText,
 			this.filePath,
 			this.theme,
-			width,
-		);
+			width - pad * 2,
+		).map((line) => margin + line + margin);
 		this.cachedWidth = width;
 		this.cachedLines = lines;
 		return lines;
 	}
 }
+
+// Preserve the existing symbol names for consumers migrating to tool-diff.ts.
+export { ToolDiffComponent as ClaudeDiffComponent, renderToolDiffLines as renderClaudeDiffLines };

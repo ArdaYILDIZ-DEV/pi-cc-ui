@@ -1,14 +1,14 @@
-/**
- * cc-ui — Claude Code UI extension for Pi.
- * Provides a compact CC-style spinner (· ✢ ✳ ✶ ✻ ✽), dynamic action verbs,
- * live tokens/sec streaming rate, 5-minute Prompt Cache TTL counter widget with git branch status,
- * and compact Claude-style renderers (● Label(detail) / └ summary) for every tool.
- */
+/** Arda's compact Pi UI: working indicator, two-row footer and tool views. */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerSpinner } from "./spinner.ts";
 import { registerCacheTimer } from "./cache-timer.ts";
 import { registerGitInfo, formatGitSummary } from "./git-info.ts";
 import { registerToolRenderers } from "./tool-renderers.ts";
+import { registerFooter } from "./footer.ts";
+
+export { registerFooter, buildFooterLines } from "./footer.ts";
+export { ToolDiffComponent, renderToolDiffLines } from "./tool-diff.ts";
+export { setClaudeToolsEnabled as setToolsEnabled, isClaudeToolsEnabled as isToolsEnabled } from "./tool-renderers.ts";
 
 export { registerSpinner, SpinnerController } from "./spinner.ts";
 export {
@@ -47,7 +47,7 @@ function registerSafely<T>(feature: string, register: () => T): T | undefined {
 	try {
 		return register();
 	} catch (error) {
-		console.error(`[cc-ui] ${feature} disabled during Pi API setup.`, error);
+		console.error(`[arda-pi-ui] ${feature} disabled during Pi API setup.`, error);
 		return undefined;
 	}
 }
@@ -70,5 +70,8 @@ export default function (pi: ExtensionAPI): void {
 			}),
 		);
 	}
+	registerSafely("Footer", () =>
+		registerFooter(pi, { git: gitController, cache: cacheController }),
+	);
 	registerSafely("Tool renderers", () => registerToolRenderers(pi));
 }

@@ -651,8 +651,9 @@ export class SpinnerController {
 	private lastContentDeltaAt: number | null = null;
 	private contentCharacters = 0;
 	private firstContentDeltaCharacters = 0;
-	private contentDeltaCount = 0;
-	private sawToolCall = false;
+	private firstReportedTokens: number | null = null;
+	private reportedStreamStart: number | null = null;
+	private lastReportedDeltaAt: number | null = null;
 	private runContentTokens = 0;
 	private runContentStreamMs = 0;
 	private currentTps: number | null = null;
@@ -881,8 +882,9 @@ export class SpinnerController {
 		this.lastContentDeltaAt = null;
 		this.contentCharacters = 0;
 		this.firstContentDeltaCharacters = 0;
-		this.contentDeltaCount = 0;
-		this.sawToolCall = false;
+		this.firstReportedTokens = null;
+		this.reportedStreamStart = null;
+		this.lastReportedDeltaAt = null;
 		this.runContentTokens = 0;
 		this.runContentStreamMs = 0;
 		this.clearThinkingTimers();
@@ -921,19 +923,22 @@ export class SpinnerController {
 			out !== this.streamTokens
 		) {
 			this.streamTokens = Math.floor(out);
-			if (this.contentStreamStart !== null) {
-				const elapsedMs = Date.now() - this.contentStreamStart;
-				if (elapsedMs >= 200 && this.streamTokens > 0) {
-					this.currentTps = this.streamTokens / (elapsedMs / 1000);
+			if (out > 0) {
+				const now = Date.now();
+				if (this.firstReportedTokens === null || out < this.firstReportedTokens) {
+					this.firstReportedTokens = this.streamTokens;
+					this.reportedStreamStart = now;
 				}
+				this.lastReportedDeltaAt = now;
 			}
 			changed = true;
 		}
-		if (ame.type === "toolcall_delta") {
-			this.sawToolCall = true;
-		} else if (ame.type === "text_delta" || ame.type === "thinking_delta") {
-			const delta =
-				typeof (ame as any).delta === "string" ? (ame as any).delta : "";
+		if (
+			ame.type === "text_delta" ||
+			ame.type === "thinking_delta" ||
+			ame.type === "toolcall_delta"
+		) {
+			const delta = typeof ame.delta === "string" ? ame.delta : "";
 			if (delta.length > 0) {
 				const now = Date.now();
 				if (this.contentStreamStart === null) {
@@ -942,17 +947,22 @@ export class SpinnerController {
 				}
 				this.lastContentDeltaAt = now;
 				this.contentCharacters += delta.length;
-				this.contentDeltaCount++;
-
-				const elapsedMs = now - this.contentStreamStart;
-				const streamedChars =
-					this.contentCharacters - this.firstContentDeltaCharacters;
-				if (this.contentDeltaCount >= 2 && elapsedMs >= 200 && streamedChars > 0) {
-					const estimatedTokens = Math.ceil(streamedChars / 4);
-					this.currentTps = estimatedTokens / (elapsedMs / 1000);
-					changed = true;
-				}
 			}
+		}
+		const firstReported = this.firstReportedTokens;
+		const reportedStart = this.reportedStreamStart;
+		const hasReportedRate = firstReported !== null &&
+			this.streamTokens > firstReported && reportedStart !== null;
+		const elapsedMs = hasReportedRate
+			? (this.lastReportedDeltaAt ?? reportedStart) - reportedStart
+			: (this.lastContentDeltaAt ?? 0) - (this.contentStreamStart ?? 0);
+		const streamedTokens = hasReportedRate
+			? this.streamTokens - firstReported
+			: (this.contentCharacters - this.firstContentDeltaCharacters) / 4;
+		if (elapsedMs >= 200 && streamedTokens > 0) {
+			this.currentTps = (this.runContentTokens + streamedTokens) /
+				((this.runContentStreamMs + elapsedMs) / 1000);
+			changed = true;
 		}
 		if (ame.type === "thinking_start") {
 			this.effortSuffix = effortSuffixFor(
@@ -996,38 +1006,36 @@ export class SpinnerController {
 		this.settledTokens += finalTokens;
 		this.streamTokens = 0;
 
-		if (!this.sawToolCall) {
-			this.sawToolCall =
-				Array.isArray(msg?.content) &&
-				msg.content.some((b: any) => b?.type === "toolCall");
-		}
-		if (this.contentStreamStart !== null && this.contentCharacters > 0) {
-			const streamEnd = this.lastContentDeltaAt ?? this.contentStreamStart;
-			const streamMs = streamEnd - this.contentStreamStart;
-			const estimatedFirstDeltaTokens = Math.ceil(
-				this.firstContentDeltaCharacters / 4,
-			);
-			const streamedTokens =
-				!this.sawToolCall && typeof out === "number" && out > 0
-					? Math.max(0, out - estimatedFirstDeltaTokens)
-					: Math.max(
-							0,
-							Math.ceil(this.contentCharacters / 4) - estimatedFirstDeltaTokens,
-						);
-
-			if (this.contentDeltaCount >= 2 && streamMs >= 50 && streamedTokens > 0) {
-				this.runContentTokens += streamedTokens;
-				this.runContentStreamMs += streamMs;
-				this.currentTps = this.runContentTokens / (this.runContentStreamMs / 1000);
-			}
+		// Exclude the first chunk (unknown generation time) and final delivery delay.
+		// Providers without live usage are calibrated against their final token count.
+		const firstReported = this.firstReportedTokens;
+		const reportedStart = this.reportedStreamStart;
+		const hasReportedRate = firstReported !== null &&
+			finalTokens > firstReported && reportedStart !== null;
+		const streamMs = hasReportedRate
+			? Math.max(this.lastReportedDeltaAt ?? 0, this.lastContentDeltaAt ?? 0) - reportedStart
+			: (this.lastContentDeltaAt ?? 0) - (this.contentStreamStart ?? 0);
+		const remainingFraction = this.contentCharacters > 0
+			? (this.contentCharacters - this.firstContentDeltaCharacters) / this.contentCharacters
+			: 0;
+		const streamedTokens = hasReportedRate
+			? finalTokens - firstReported
+			: typeof out === "number" && Number.isFinite(out) && out > 0
+				? finalTokens * remainingFraction
+				: (this.contentCharacters - this.firstContentDeltaCharacters) / 4;
+		if (streamMs >= 50 && streamedTokens > 0) {
+			this.runContentTokens += streamedTokens;
+			this.runContentStreamMs += streamMs;
+			this.currentTps = this.runContentTokens / (this.runContentStreamMs / 1000);
 		}
 
 		this.contentStreamStart = null;
 		this.lastContentDeltaAt = null;
 		this.contentCharacters = 0;
 		this.firstContentDeltaCharacters = 0;
-		this.contentDeltaCount = 0;
-		this.sawToolCall = false;
+		this.firstReportedTokens = null;
+		this.reportedStreamStart = null;
+		this.lastReportedDeltaAt = null;
 
 		this.settleThinking();
 		if (ctx?.hasUI && this.timer !== null) {

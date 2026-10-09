@@ -475,6 +475,71 @@ describe("spinner", () => {
 		});
 	});
 
+	describe("streaming rate", () => {
+		it("prefers reported output increments over character estimates", (t) => {
+			let now = 1000;
+			t.mock.method(Date, "now", () => now);
+			const controller = new SpinnerController();
+			const ctx = { hasUI: false } as Parameters<SpinnerController["handleAgentStart"]>[0];
+			const delta = (output: number, text: string, type = "text_delta") => controller.handleMessageUpdate({
+				assistantMessageEvent: { type, delta: text, partial: { usage: { output } } },
+			} as Parameters<SpinnerController["handleMessageUpdate"]>[0], ctx);
+			controller.handleAgentStart(ctx);
+			delta(10, "first chunk");
+			now = 2000;
+			delta(30, "x");
+			assert.equal(controller.getTokensPerSecond(), 20);
+			now = 3000;
+			delta(50, "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+			assert.equal(controller.getTokensPerSecond(), 20);
+			now = 8000;
+			controller.handleMessageEnd({ message: { role: "assistant", usage: { output: 50 }, content: [] } } as unknown as Parameters<SpinnerController["handleMessageEnd"]>[0], ctx);
+			assert.equal(controller.getTokensPerSecond(), 20);
+			controller.dispose();
+		});
+
+		it("calibrates character-only streams with final usage, including tool arguments", (t) => {
+			let now = 1000;
+			t.mock.method(Date, "now", () => now);
+			const controller = new SpinnerController();
+			const ctx = { hasUI: false } as Parameters<SpinnerController["handleAgentStart"]>[0];
+			controller.handleAgentStart(ctx);
+			for (const type of ["thinking_delta", "toolcall_delta"]) {
+				controller.handleMessageUpdate({ assistantMessageEvent: { type, delta: "x".repeat(40), partial: { usage: { output: 0 } } } } as Parameters<SpinnerController["handleMessageUpdate"]>[0], ctx);
+				now += 1000;
+			}
+			assert.equal(controller.getTokensPerSecond(), 10);
+			now = 9000;
+			controller.handleMessageEnd({ message: { role: "assistant", usage: { output: 100 }, content: [{ type: "toolCall" }] } } as Parameters<SpinnerController["handleMessageEnd"]>[0], ctx);
+			assert.equal(controller.getTokensPerSecond(), 50);
+			controller.handleAgentStart(ctx);
+			assert.equal(controller.getTokensPerSecond(), null);
+			controller.dispose();
+		});
+
+		it("uses time-weighted rates across requests, excluding tool execution pauses", (t) => {
+			let now = 1000;
+			t.mock.method(Date, "now", () => now);
+			const controller = new SpinnerController();
+			const ctx = { hasUI: false } as Parameters<SpinnerController["handleAgentStart"]>[0];
+			controller.handleAgentStart(ctx);
+			const delta = (output: number) => controller.handleMessageUpdate({ assistantMessageEvent: { type: "text_delta", delta: "xxxx", partial: { usage: { output } } } } as Parameters<SpinnerController["handleMessageUpdate"]>[0], ctx);
+			const end = (output: number) => controller.handleMessageEnd({ message: { role: "assistant", usage: { output }, content: [] } } as unknown as Parameters<SpinnerController["handleMessageEnd"]>[0], ctx);
+			delta(10);
+			now = 2000;
+			delta(30);
+			end(30);
+			now = 20_000;
+			delta(5);
+			now = 22_000;
+			delta(25);
+			end(25);
+			assert.ok(Math.abs(controller.getTokensPerSecond()! - 40 / 3) < 0.001);
+			assert.equal(controller.getState().totalTokens, 55);
+			controller.dispose();
+		});
+	});
+
 	describe("registerSpinner", () => {
 		it("registers event handlers on pi ExtensionAPI and returns controller", () => {
 			const handlers: Record<string, Function> = {};

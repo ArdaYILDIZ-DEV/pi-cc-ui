@@ -1,32 +1,20 @@
 /**
- * Claude-style compact tool renderers, generalized to all tools.
- *
- * Ported from Ga-hou/pi-claude-style-tui `extensions/claude-message-ui.ts`
- * (`registerClaudeToolRenderers`). The upstream version only handles Pi-owned
- * builtin tools (`sourceInfo.source === "builtin"`) by recreating each
- * definition via `createXToolDefinition(cwd)` and re-registering it with a
- * compact `● Label(detail)` / `└ summary` renderer.
- *
- * This port keeps that official-API path for the 8 known builtins
- * (read/bash/powershell/edit/write/grep/find/ls — upstream misses
- * powershell) and adds a global `ToolExecutionComponent` prototype patch so
- * every other tool (custom / extension / sdk tools such as
- * `ask_user_question`, `web_search`, pi-lens tools, ...) renders in the same
- * compact Claude style without needing its `execute` function.
- *
- * When an original custom renderer exists it is preserved for the expanded
- * view (`to expand`); the collapsed view always uses the compact summary.
+ * Compact tool views through Pi's public renderer resolver.
+ * Expanded views retain the original renderer; execution is never replaced.
+ * The older re-registration/prototype implementation remains a compatibility
+ * path only for hosts without registerToolRenderer.
  */
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import type {
 	ExtensionAPI,
 	ToolDefinition,
+	ToolRenderers,
 	Theme,
 } from "@earendil-works/pi-coding-agent";
 import * as PiTui from "@earendil-works/pi-tui";
 import type { Text } from "@earendil-works/pi-tui";
 import { notifySafely } from "./pi-compat.ts";
-import { ClaudeDiffComponent } from "./claude-diff.ts";
+import { ToolDiffComponent } from "./tool-diff.ts";
 
 const {
 	createBashToolDefinition,
@@ -46,14 +34,20 @@ let piCompatibilityWarningLogged = false;
 function warnPiCompatibility(feature: string): void {
 	if (piCompatibilityWarningLogged) return;
 	piCompatibilityWarningLogged = true;
-	console.warn(`[cc-ui] Pi ${feature} unavailable; using built-in renderers.`);
+	console.warn(`[arda-pi-ui] Pi ${feature} unavailable; using built-in renderers.`);
 }
 
 type RenderContext = {
 	executionStarted: boolean;
 	isError: boolean;
 	isPartial: boolean;
+	outputPad?: number;
 };
+
+function outputPadding(context: RenderContext): number {
+	return typeof context.outputPad === "number" && Number.isFinite(context.outputPad)
+		? Math.max(0, Math.floor(context.outputPad)) : 1;
+}
 
 type TextResult = {
 	content: Array<{ type: string; text?: string }>;
@@ -134,7 +128,7 @@ function renderCall(
 	const suffix = detail ? theme.fg("muted", `(${singleLine(detail)})`) : "";
 	return new PiTui.Text(
 		`${theme.fg(dotColor, "●")} ${theme.fg("toolTitle", theme.bold(safeLabel))}${suffix}`,
-		1,
+		outputPadding(context),
 		0,
 	);
 }
@@ -149,7 +143,7 @@ function renderResult(
 	const output = resultText(result);
 	if (options.isPartial) {
 		const progress = singleLine(output) || "Working…";
-		return new PiTui.Text(theme.fg("dim", `  └ ${progress}`), 1, 0);
+		return new PiTui.Text(theme.fg("dim", `  └ ${progress}`), outputPadding(context), 0);
 	}
 
 	const isError = context.isError;
@@ -172,7 +166,7 @@ function renderResult(
 			text += `\n${theme.fg("dim", `    … ${lines.length - MAX_EXPANDED_LINES} more lines`)}`;
 		}
 	}
-	return new PiTui.Text(text, 1, 0);
+	return new PiTui.Text(text, outputPadding(context), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -307,8 +301,45 @@ function genericRenderResult(
 	return renderResult(result, options, theme, context, genericSummary);
 }
 
+function compactToolRenderers(toolName: string, base?: ToolRenderers): ToolRenderers {
+	return {
+		renderShell: "self",
+		renderCall(args, theme, context) {
+			if (context.expanded && base?.renderCall) {
+				return base.renderCall(args, theme, context);
+			}
+			return genericRenderCall(args, theme, context, toolName);
+		},
+		renderResult(result, options, theme, context) {
+			if (context.isError) {
+				return genericRenderResult(result, options, theme, context);
+			}
+			if (base?.renderResult && (options.expanded || result.content.some((item) => item.type === "image"))) {
+				return base.renderResult(result, options, theme, context);
+			}
+			if (toolName === "edit" && !options.isPartial) {
+				const diff = (result.details as { diff?: unknown } | undefined)?.diff;
+				if (typeof diff === "string" && diff.trim()) {
+					const args = context.args as { path?: string; file_path?: string } | undefined;
+					return new ToolDiffComponent(diff, args?.path ?? args?.file_path ?? "", theme, outputPadding(context));
+				}
+			}
+			if (result.content.some((item) => item.type === "image") && !options.expanded) {
+				return new PiTui.Text(theme.fg("dim", "  └ Image result (expand to view)"), outputPadding(context), 0);
+			}
+			const noun = toolName === "read" ? "Read"
+				: toolName === "bash" || toolName === "powershell" ? "Returned"
+				: toolName === "grep" || toolName === "find" ? "Found"
+				: toolName === "ls" ? "Listed" : "Completed";
+			return renderResult(result, options, theme, context, (output) =>
+				toolName === "write" ? "Written" : toolName === "edit" ? "Updated" : lineSummary(noun, output),
+			);
+		},
+	};
+}
+
 // ---------------------------------------------------------------------------
-// Official-API path: builtin overrides via re-registration (upstream parity)
+// Compatibility path for older Pi hosts without registerToolRenderer
 // ---------------------------------------------------------------------------
 
 /**
@@ -427,7 +458,7 @@ export function registerClaudeToolRenderers(
 							| { path?: string; file_path?: string }
 							| undefined;
 						const path = editArgs?.path ?? editArgs?.file_path ?? "";
-						return new ClaudeDiffComponent(diff, path, theme);
+						return new ToolDiffComponent(diff, path, theme);
 					}
 					if (options.expanded && tool.renderResult) {
 						return tool.renderResult(result, options, theme, context);
@@ -604,6 +635,8 @@ export function setClaudeToolsEnabled(
 	const targetCwd =
 		typeof cwd === "string" && cwd ? cwd : (lastCwd ?? process.cwd());
 	lastCwd = targetCwd;
+	// Pi 1.x resolves display separately; toggling must not replace tool execution.
+	if (typeof pi.registerToolRenderer === "function") return [];
 	if (claudeToolsEnabled) {
 		try {
 			installGlobalClaudeToolPatch();
@@ -640,7 +673,7 @@ type PatchedProto = {
 	__ccUiOrigHasRendererDefinition?: (...args: unknown[]) => unknown;
 };
 
-function getPatchTarget(): PatchedProto | null {
+function getPatchTarget(warnIfUnavailable = true): PatchedProto | null {
 	try {
 		// SAFETY: ToolExecutionComponent is an exported Pi class whose prototype shape
 		// is not in its public d.ts (private render methods); we only read the
@@ -650,7 +683,7 @@ function getPatchTarget(): PatchedProto | null {
 			| undefined;
 		const proto = component?.prototype;
 		if (!proto || typeof proto !== "object") {
-			warnPiCompatibility("tool renderer component");
+			if (warnIfUnavailable) warnPiCompatibility("tool renderer component");
 			return null;
 		}
 		return proto;
@@ -934,26 +967,29 @@ export function uninstallGlobalClaudeToolPatch(): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// cc-ui wiring: patch once + builtin overrides per TUI session
+// arda-pi-ui wiring: public resolver, with legacy-host compatibility
 // ---------------------------------------------------------------------------
 
-/**
- * Wire Claude-style tool rendering into cc-ui.
- * Installs the global fallback and registers the official builtin overrides on
- * every TUI `session_start` (upstream parity: original registers inside
- * `session_start` with the live `ctx.cwd`). Nothing starts in the factory body
- * (skill lifecycle rule); install happens on session_start. Also adds the
- * `/cc-tools` command (on/off/toggle) for dynamic control.
- */
+/** Register the render-only resolver and compact-view commands. */
 export function registerToolRenderers(pi: ExtensionAPI): void {
-	pi.registerCommand("cc-tools", {
+	if (typeof pi.registerToolRenderer === "function") {
+		// A reload can retain the prototype modified by the previous extension.
+		if (getPatchTarget(false)?.__ccUiToolPatchInstalled && !uninstallGlobalClaudeToolPatch()) {
+			throw new Error("Cannot restore the previous compact-tool prototype patch.");
+		}
+		pi.registerToolRenderer((toolName, next) => {
+			const base = next();
+			return claudeToolsEnabled ? compactToolRenderers(toolName, base) : base;
+		});
+	}
+	const command: Parameters<ExtensionAPI["registerCommand"]>[1] = {
 		description:
-			"Claude tarzı kompakt tool görünümünü aç/kapat (cc-tools, cc-tools on/off/toggle)",
+			"Kompakt araç görünümünü aç/kapat (arda-tools on/off/toggle)",
 		handler: async (args, ctx) => {
 			const clean = (typeof args === "string" ? args : "").trim().toLowerCase();
 			if (clean === "on" || clean === "ac" || clean === "aç") {
 				setClaudeToolsEnabled(pi, true, ctx.cwd);
-				notifySafely(ctx, "Claude tool görünümü: açık", "info");
+				notifySafely(ctx, "Kompakt araç görünümü: açık", "info");
 				return;
 			}
 			if (
@@ -963,24 +999,25 @@ export function registerToolRenderers(pi: ExtensionAPI): void {
 				clean === "kapalı"
 			) {
 				setClaudeToolsEnabled(pi, false, ctx.cwd);
-				notifySafely(ctx, "Claude tool görünümü: kapalı", "info");
+				notifySafely(ctx, "Kompakt araç görünümü: kapalı", "info");
 				return;
 			}
 			if (clean === "toggle") {
 				const next = !isClaudeToolsEnabled();
 				setClaudeToolsEnabled(pi, next, ctx.cwd);
-				notifySafely(ctx, `Claude tool görünümü: ${next ? "açık" : "kapalı"}`, "info");
+				notifySafely(ctx, `Kompakt araç görünümü: ${next ? "açık" : "kapalı"}`, "info");
 				return;
 			}
 			notifySafely(
 				ctx,
-				`Claude tool görünümü: ${isClaudeToolsEnabled() ? "açık" : "kapalı"} ` +
-					`(${wrappableBuiltinNames.size} builtin + tüm özel araçlar). ` +
-					`Kullanım: cc-tools on/off/toggle.`,
+				`Kompakt araç görünümü: ${isClaudeToolsEnabled() ? "açık" : "kapalı"}. ` +
+					`Kullanım: arda-tools on/off/toggle.`,
 				"info",
 			);
 		},
-	});
+	};
+	pi.registerCommand("arda-tools", command);
+	pi.registerCommand("cc-tools", command);
 
 	pi.on("session_start", async (_event, ctx) => {
 		try {
@@ -993,6 +1030,7 @@ export function registerToolRenderers(pi: ExtensionAPI): void {
 		} catch {
 			/* ignore */
 		}
+		if (typeof pi.registerToolRenderer === "function") return;
 		if (!claudeToolsEnabled) {
 			try {
 				uninstallGlobalClaudeToolPatch();

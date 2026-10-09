@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it, afterEach } from "node:test";
-import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, Theme, ToolRendererResolver, ToolRenderers } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import {
 	addAssistantResponseMarker,
@@ -286,6 +286,80 @@ describe("registerClaudeToolRenderers (builtin official path)", () => {
 			},
 		) as { render: (width: number) => string[] };
 		assert.ok(errorComp.render(80).join("\n").includes("File not found"));
+	});
+});
+
+describe("Pi 1.x public renderer resolver", () => {
+	afterEach(() => { uninstallGlobalClaudeToolPatch(); });
+
+	it("renders builtin and custom tools without re-registering execution or patching the host", async () => {
+		const { pi, registered } = createMockPi(["edit", "bash"]);
+		let resolver: ToolRendererResolver | undefined;
+		pi.registerToolRenderer = (value) => { resolver = value; };
+		const prototype = ToolExecutionComponent.prototype as unknown as Record<string, unknown>;
+		const original = prototype.getCallRenderer;
+		registerToolRenderers(pi);
+		await pi.emit("session_start", {}, { mode: "tui", cwd: "/tmp", hasUI: true });
+		assert.ok(resolver);
+		assert.equal(registered.length, 0);
+		assert.equal(prototype.getCallRenderer, original);
+		assert.equal(isGlobalClaudeToolPatchInstalled(), false);
+		const theme = createMockTheme();
+		const context = { executionStarted: true, isError: false, isPartial: false } as never;
+		const bash = resolver("bash", () => undefined)!;
+		assert.ok(bash.renderCall!({ command: "echo test" }, theme, context).render(80).join("\n").includes("Bash"));
+		assert.ok(bash.renderResult!({ content: [{ type: "text", text: "a\nb" }], details: {} }, { expanded: false, isPartial: false }, theme, context).render(80).join("\n").includes("Returned 2 lines"));
+		const custom = resolver("web_search", () => undefined)!;
+		assert.ok(custom.renderCall!({ query: "test" }, theme, context).render(80).join("\n").includes("Web Search"));
+		const edit = resolver("edit", () => undefined)!;
+		const diff = edit.renderResult!({ content: [], details: { diff: "-1 old\n+1 new" } }, { expanded: false, isPartial: false }, theme, context);
+		assert.ok(diff.render(80).join("\n").includes("new"));
+	});
+
+	it("removes its own legacy patch when reloading into the public resolver path", () => {
+		const prototype = ToolExecutionComponent.prototype as unknown as Record<string, unknown>;
+		const original = prototype.getCallRenderer;
+		assert.equal(installGlobalClaudeToolPatch(), true);
+		const { pi } = createMockPi();
+		pi.registerToolRenderer = () => {};
+		registerToolRenderers(pi);
+		assert.equal(isGlobalClaudeToolPatchInstalled(), false);
+		assert.equal(prototype.getCallRenderer, original);
+	});
+
+	it("honors Pi 1.1 outputPad for compact calls, results and edit diffs", () => {
+		const { pi } = createMockPi();
+		let resolver: ToolRendererResolver | undefined;
+		pi.registerToolRenderer = (value) => { resolver = value; };
+		registerToolRenderers(pi);
+		const context = { executionStarted: true, outputPad: 4 } as never;
+		const theme = createMockTheme();
+		const bash = resolver!("bash", () => undefined)!;
+		assert.ok(bash.renderCall!({ command: "echo test" }, theme, context).render(80)[0].startsWith("    ●"));
+		assert.ok(bash.renderResult!({ content: [{ type: "text", text: "done" }], details: {} }, { expanded: false, isPartial: false }, theme, context).render(80)[0].startsWith("      └"));
+		const edit = resolver!("edit", () => undefined)!;
+		const diff = edit.renderResult!({ content: [], details: { diff: "+1 new" } }, { expanded: false, isPartial: false }, theme, context);
+		assert.ok(diff.render(80)[0].startsWith("    "));
+	});
+
+	it("preserves expanded custom views, images, and the next resolver when disabled", () => {
+		const { pi, registered } = createMockPi();
+		let resolver: ToolRendererResolver | undefined;
+		pi.registerToolRenderer = (value) => { resolver = value; };
+		registerToolRenderers(pi);
+		const call = new Text("rich call", 0, 0);
+		const result = new Text("rich result", 0, 0);
+		const base: ToolRenderers = { renderShell: "default", renderCall: () => call, renderResult: () => result };
+		const wrapped = resolver!("custom", () => base)!;
+		const theme = createMockTheme();
+		assert.equal(wrapped.renderCall!({}, theme, { expanded: true } as never), call);
+		assert.equal(wrapped.renderResult!({ content: [], details: {} }, { expanded: true, isPartial: false }, theme, {} as never), result);
+		assert.equal(wrapped.renderResult!({ content: [{ type: "image", data: "", mimeType: "image/png" }], details: {} }, { expanded: false, isPartial: false }, theme, {} as never), result);
+		setClaudeToolsEnabled(pi, false, "/tmp");
+		assert.equal(resolver!("custom", () => base), base);
+		assert.equal(registered.length, 0);
+		setClaudeToolsEnabled(pi, true, "/tmp");
+		assert.equal(registered.length, 0);
 	});
 });
 

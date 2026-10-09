@@ -1,5 +1,5 @@
 /**
- * cc-ui — Git repository information tracker for Pi.
+ * arda-pi-ui — Git repository information tracker for Pi.
  *
  * Lightweight, zero-dependency git status inspection using native Node.js child_process.
  * Queries current branch, detached HEAD, count of modified/untracked files,
@@ -167,7 +167,13 @@ export class GitInfoController {
 	private currentCwd: string = "";
 	private isRefreshing = false;
 	private refreshPending = false;
+	private refreshPrPending = false;
+	private pendingRefreshWaiters: {
+		resolve(state: GitInfoState): void;
+		reject(error: unknown): void;
+	}[] = [];
 	private lastQueriedPrBranch: string | null = null;
+	private lastQueriedPrCwd: string | null = null;
 
 	constructor(runner?: CommandRunnerFn) {
 		if (typeof runner === "function") {
@@ -201,7 +207,7 @@ export class GitInfoController {
 		}
 	}
 
-	public async refresh(cwd?: string): Promise<GitInfoState> {
+	public async refresh(cwd?: string, options?: { refreshPr?: boolean }): Promise<GitInfoState> {
 		if (cwd) {
 			this.currentCwd = cwd;
 		}
@@ -209,7 +215,10 @@ export class GitInfoController {
 
 		if (this.isRefreshing) {
 			this.refreshPending = true;
-			return this.state;
+			this.refreshPrPending ||= options?.refreshPr === true;
+			return new Promise<GitInfoState>((resolve, reject) => {
+				this.pendingRefreshWaiters.push({ resolve, reject });
+			});
 		}
 
 		this.isRefreshing = true;
@@ -224,6 +233,7 @@ export class GitInfoController {
 
 			if (repoCheck.code !== 0 || repoCheck.stdout.trim() !== "true") {
 				this.lastQueriedPrBranch = null;
+				this.lastQueriedPrCwd = null;
 				this.state = emptyGitInfoState();
 				this.notify();
 				return this.state;
@@ -257,7 +267,8 @@ export class GitInfoController {
 				rawBranch || (shortHead ? `detached@${shortHead}` : "detached");
 			const changedFiles =
 				statusRes.code === 0 ? countChangedFiles(statusRes.stdout) : 0;
-			const branchChanged = rawBranch !== this.lastQueriedPrBranch;
+			const branchChanged = rawBranch !== this.lastQueriedPrBranch ||
+				targetCwd !== this.lastQueriedPrCwd || options?.refreshPr === true;
 
 			this.state = {
 				isRepository: true,
@@ -268,8 +279,9 @@ export class GitInfoController {
 			this.notify();
 
 			// 3. If there is an active named branch, query GitHub PR in the background
-			if (rawBranch) {
+			if (rawBranch && branchChanged) {
 				this.lastQueriedPrBranch = rawBranch;
+				this.lastQueriedPrCwd = targetCwd;
 				try {
 					const prRes = await this.runner(
 						"gh",
@@ -290,8 +302,9 @@ export class GitInfoController {
 				} catch {
 					/* gh CLI might not be installed or authenticated; non-fatal */
 				}
-			} else {
+			} else if (!rawBranch) {
 				this.lastQueriedPrBranch = null;
+				this.lastQueriedPrCwd = null;
 			}
 		} catch {
 			this.state = emptyGitInfoState();
@@ -299,8 +312,15 @@ export class GitInfoController {
 		} finally {
 			this.isRefreshing = false;
 			if (this.refreshPending) {
+				const refreshPr = this.refreshPrPending;
+				const waiters = this.pendingRefreshWaiters;
+				this.pendingRefreshWaiters = [];
 				this.refreshPending = false;
-				void this.refresh(this.currentCwd);
+				this.refreshPrPending = false;
+				void this.refresh(this.currentCwd, { refreshPr }).then(
+					(state) => { for (const waiter of waiters) waiter.resolve(state); },
+					(error: unknown) => { for (const waiter of waiters) waiter.reject(error); },
+				);
 			}
 		}
 
@@ -318,8 +338,9 @@ export function registerGitInfo(pi: ExtensionAPI): GitInfoController {
 		await controller.refresh(ctx?.cwd);
 	});
 
-	pi.on("tool_execution_end", (_event, ctx) => {
-		// Non-blocking asynchronous refresh after filesystem modifications
+	pi.on("tool_execution_end", (event, ctx) => {
+		// Known read-only builtins cannot change the repository; custom tools may.
+		if (["read", "grep", "find", "ls"].includes(event.toolName)) return;
 		void controller.refresh(ctx?.cwd);
 	});
 
@@ -333,7 +354,7 @@ export function registerGitInfo(pi: ExtensionAPI): GitInfoController {
 		handler: async (args, ctx) => {
 			const clean = sanitizeControlChars(stripAnsi(args)).trim().toLowerCase();
 			if (clean === "refresh" || clean === "tazele") {
-				await controller.refresh(ctx?.cwd);
+				await controller.refresh(ctx?.cwd, { refreshPr: true });
 				notifySafely(ctx, "Git bilgileri güncellendi.", "info");
 				return;
 			}

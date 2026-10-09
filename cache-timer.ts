@@ -1,10 +1,7 @@
 /**
- * CC Cache TTL counter widget, displayed immediately below the editor.
- *
- * Anthropic's prompt cache TTL is 5 minutes (300 seconds) from the last LLM request.
- * This widget counts elapsed time since the last context input/response and smoothly
- * interpolates color from fresh green (#4EBA65) -> yellow -> orange -> danger red,
- * darkening into deep crimson red as it approaches 5 minutes.
+ * Local cache-activity reminder with audio milestones and a five-minute default.
+ * The footer owns its presentation; standalone registration retains the widget.
+ * Elapsed local activity is not proof of any provider's cache-retention policy.
  */
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -36,7 +33,7 @@ let truncationWarningLogged = false;
 function warnTruncationFallback(error?: unknown): void {
 	if (truncationWarningLogged) return;
 	truncationWarningLogged = true;
-	console.warn("[cc-ui] Pi text truncation unavailable; using plain text.", error);
+	console.warn("[arda-pi-ui] Pi text truncation unavailable; using plain text.", error);
 }
 
 function truncateToWidth(text: string, width: number): string {
@@ -119,7 +116,7 @@ export const CACHE_SOUND_MILESTONES: readonly CacheSoundMilestone[] = [
 export type SoundPlayerFn = (filePath: string, repeat?: number) => void;
 
 /**
- * Resolves the absolute path of a sound file inside cc-ui/sounds or cc-ui root.
+ * Resolves the absolute path of a sound file inside arda-pi-ui/sounds or arda-pi-ui root.
  */
 export function resolveSoundPath(filename: string): string | null {
 	if (!filename || typeof filename !== "string") return null;
@@ -560,6 +557,7 @@ export class CacheTimerController {
 	private cachedPaint: CacheTimerPaint | null = null;
 	private readonly ttlMs: number = DEFAULT_CACHE_TTL_MS;
 	private lastCtx: UiCtx | null = null;
+	private footerRenderer: (() => void) | null = null;
 
 	constructor(
 		ttlMsOrOptions?: number | CacheTimerOptions,
@@ -592,6 +590,14 @@ export class CacheTimerController {
 
 	public getTtlMs(): number {
 		return this.ttlMs;
+	}
+
+	/** Share the timer with the footer while retaining audio and /cache controls. */
+	public setFooterRenderer(renderer: (() => void) | null, ctx?: UiCtx): void {
+		this.footerRenderer = renderer;
+		if (renderer && ctx?.hasUI) {
+			ctx.ui.setWidget("cache-timer", undefined, { placement: "belowEditor" });
+		}
 	}
 
 	public isAudioEnabled(): boolean {
@@ -828,6 +834,11 @@ export class CacheTimerController {
 		}
 
 		try {
+			if (this.footerRenderer) {
+				this.footerRenderer();
+				this.consecutiveWidgetErrors = 0;
+				return;
+			}
 			const gitSummary = this.gitInfoProvider ? this.gitInfoProvider() : null;
 
 			// If explicitly toggled off or (no context yet and no git summary), hide widget

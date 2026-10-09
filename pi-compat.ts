@@ -5,7 +5,7 @@ let notifyWarningLogged = false;
 function warnNotifyFallback(error?: unknown): void {
 	if (notifyWarningLogged) return;
 	notifyWarningLogged = true;
-	console.warn("[cc-ui] Pi notification API unavailable; command feedback is disabled.", error);
+	console.warn("[arda-pi-ui] Pi notification API unavailable; command feedback is disabled.", error);
 }
 
 /** Uses the optional UI notification API without letting host-version drift escape. */

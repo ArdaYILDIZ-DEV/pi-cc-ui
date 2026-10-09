@@ -4,13 +4,13 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { diffWords } from "../word-diff.ts";
 import {
 	applyIntraLineBg,
-	ClaudeDiffComponent,
+	ToolDiffComponent,
 	getDiffThemeColors,
 	getWordRanges,
 	pairIntraLineDiffs,
 	parseDiffText,
-	renderClaudeDiffLines,
-} from "../claude-diff.ts";
+	renderToolDiffLines,
+} from "../tool-diff.ts";
 import { stripAnsi } from "../palette.ts";
 
 const SAMPLE_DIFF = `+ 60 
@@ -142,9 +142,9 @@ describe("claude-diff parser and helpers", () => {
 	});
 });
 
-describe("renderClaudeDiffLines visual layout", () => {
+describe("renderToolDiffLines visual layout", () => {
 	it("renders lines with matching line number and sign gutter", () => {
-		const rendered = renderClaudeDiffLines(
+		const rendered = renderToolDiffLines(
 			SAMPLE_DIFF,
 			"test.ts",
 			{ name: "dark-cc" },
@@ -175,7 +175,7 @@ describe("renderClaudeDiffLines visual layout", () => {
 
 	it("pads added and removed lines across the full terminal width", () => {
 		const width = 90;
-		const rendered = renderClaudeDiffLines(
+		const rendered = renderToolDiffLines(
 			SAMPLE_DIFF,
 			"test.ts",
 			{
@@ -196,7 +196,7 @@ describe("renderClaudeDiffLines visual layout", () => {
 	it("wraps long lines into multiple rows with blank continuation gutter", () => {
 		const singleLongLine = `  10 const extremelyLongIdentifierNameThatWillDefinitelyWrapAcrossSmallColumns = 42;`;
 		const narrowWidth = 40;
-		const rendered = renderClaudeDiffLines(
+		const rendered = renderToolDiffLines(
 			singleLongLine,
 			"test.ts",
 			undefined,
@@ -212,13 +212,21 @@ describe("renderClaudeDiffLines visual layout", () => {
 	});
 
 	it("renders empty diff as empty array", () => {
-		assert.deepEqual(renderClaudeDiffLines("", "test.ts"), []);
+		assert.deepEqual(renderToolDiffLines("", "test.ts"), []);
 	});
 });
 
-describe("ClaudeDiffComponent", () => {
+describe("ToolDiffComponent", () => {
+	it("keeps added, removed and context rows within narrow terminal widths", () => {
+		for (const width of [1, 4, 10, 19, 20, 40]) {
+			const lines = renderToolDiffLines("-123 项目 old content\n+124 项目 new content\n 125 unchanged content", "test.ts", undefined, width);
+			assert.ok(lines.length > 0);
+			assert.ok(lines.every((line) => visibleWidth(line) <= width));
+		}
+	});
+
 	it("satisfies Pi Component interface and caches width renders", () => {
-		const comp = new ClaudeDiffComponent(SAMPLE_DIFF, "test.ts");
+		const comp = new ToolDiffComponent(SAMPLE_DIFF, "test.ts");
 		const lines1 = comp.render(80);
 		const lines2 = comp.render(80);
 		assert.equal(lines1, lines2); // cached instance

@@ -221,6 +221,70 @@ describe("GitInfoController lifecycle & commands", () => {
 		assert.equal(state.changedFiles, 0);
 	});
 
+	it("reuses PR lookup until the branch or repository changes, with explicit refresh support", async () => {
+		const calls: string[] = [];
+		const controller = new GitInfoController(async (cmd, args, cwd) => {
+			if (cmd === "gh") {
+				calls.push(cwd);
+				return { stdout: JSON.stringify({ number: cwd === "/repo-a" ? 1 : 2, url: "https://example.test/pr", state: "OPEN" }), code: 0 };
+			}
+			return { stdout: args[1] === "--is-inside-work-tree" ? "true" : args[0] === "branch" ? "main" : "", code: 0 };
+		});
+		await controller.refresh("/repo-a");
+		await controller.refresh("/repo-a");
+		assert.deepEqual(calls, ["/repo-a"]);
+		await controller.refresh("/repo-b");
+		assert.deepEqual(calls, ["/repo-a", "/repo-b"]);
+		assert.equal(controller.getState().pullRequest?.number, 2);
+		await controller.refresh("/repo-b", { refreshPr: true });
+		assert.equal(calls.length, 3);
+	});
+
+	it("preserves an explicit PR refresh requested during an in-flight update", async () => {
+		let release!: () => void;
+		let reached!: () => void;
+		const gate = new Promise<void>((resolve) => { release = resolve; });
+		const started = new Promise<void>((resolve) => { reached = resolve; });
+		let calls = 0;
+		const controller = new GitInfoController(async (cmd, args) => {
+			if (cmd === "gh") {
+				calls++;
+				if (calls === 1) { reached(); await gate; }
+				return { stdout: "", code: 1 };
+			}
+			return { stdout: args[1] === "--is-inside-work-tree" ? "true" : args[0] === "branch" ? "main" : "", code: 0 };
+		});
+		const first = controller.refresh("/repo");
+		await started;
+		let queuedSettled = false;
+		const queued = controller.refresh("/repo", { refreshPr: true }).then((state) => {
+			queuedSettled = true;
+			return state;
+		});
+		try {
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			assert.equal(queuedSettled, false, "queued refresh must await the actual inspection");
+		} finally {
+			release();
+		}
+		await first;
+		await queued;
+		assert.equal(calls, 2);
+	});
+
+	it("does not spawn git inspections for read-only builtin tool completions", async () => {
+		const handlers = new Map<string, Function>();
+		const controller = registerGitInfo({ on: (name: string, handler: Function) => handlers.set(name, handler), registerCommand: () => {} } as any);
+		let calls = 0;
+		controller.setRunner(async () => { calls++; return { stdout: "", code: 1 }; });
+		for (const toolName of ["read", "grep", "find", "ls"]) {
+			handlers.get("tool_execution_end")!({ toolName }, { cwd: "/repo" });
+		}
+		assert.equal(calls, 0);
+		handlers.get("tool_execution_end")!({ toolName: "edit" }, { cwd: "/repo" });
+		assert.equal(calls, 1);
+	});
+
 	it("registers slash command /git and handles /git refresh", async () => {
 		type HandlerFn = (args: string, ctx: any) => Promise<void>;
 		let registeredHandler: HandlerFn | undefined;

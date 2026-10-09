@@ -1,84 +1,75 @@
-<p align="center">
-  <strong>Claude Code spinner with live token rate, 5-minute prompt cache TTL counter with git status, and compact tool renderers for Pi.</strong><br>
-  <img src="https://img.shields.io/badge/node-%3E%3D22-blue?style=flat-square" alt="Node.js 22+">
-  <img src="https://img.shields.io/badge/typescript-7.0%2B-blue?style=flat-square" alt="TypeScript 7.0+">
-  <img src="https://img.shields.io/badge/tests-187%20passed-green?style=flat-square" alt="187 tests passed">
-  <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT License">
-</p>
+# arda-pi-ui
 
-`cc-ui` is a terminal UI extension for Pi that replaces the default working indicator with a compact animated spinner and live streaming generation speed (`tok/s`), adds git status and a prompt cache TTL counter beneath the editor, and renders tool calls in compact Claude style (`● Label(detail)` / `└ summary`).
+Arda's compact terminal UI for Pi. Keeps the animated working row, replaces the default footer with a muted-orange status line, and draws compact tool calls and edit diffs.
+
+```text
+Model (effort) | folder | main +5 | 75.5k / 500k | cache 78% | ttl 1dk 47sn / 5dk       $0.123 est
+codex … | Σtokens · $cost est
+```
+
+This is an illustrative layout, not measured usage. The second row reads **all extension statuses** from Pi's footer provider, without provider-specific parsing or key matching. Codex quota and usage-ledger extensions keep producing their own data; this extension changes only its presentation. Long status rows wrap rather than dropping quota or cost text. The path is reduced to the current folder name.
+
+The session's recorded cost estimate is right-aligned on the main row, with space reserved even on narrow terminals. It includes assistant, tool, standalone-usage and summary costs across the session. Missing price data is shown as `$? est`; very small positive costs as `<$0.001 est`. These are provider-recorded estimates, **not invoices or additional subscription charges**. A usage-ledger total below covers a different scope.
+
+On narrower terminals, complete TTL, cache, Git and folder segments are dropped in that order. Context and price take priority over a shortened model name; numeric telemetry is not cut mid-value. Extremely small widths cannot display all fields.
 
 ## Installation
 
-Pi automatically discovers extensions inside `~/.pi/agent/extensions/`. The extension adds no runtime package dependencies; it uses Pi's host APIs:
+Requires Node.js 22.19+ and Pi 1.1.x or newer within the 1.x series. Typecheck and tests are verified against Pi 1.1.0; later releases are not a compatibility guarantee.
+
+Pi discovers this directory under `~/.pi/agent/extensions/arda-pi-ui/`. The Git repository URL retains its original name:
 
 ```sh
-git clone https://github.com/ArdaYILDIZ-DEV/pi-cc-ui.git ~/.pi/agent/extensions/cc-ui
+git clone https://github.com/ArdaYILDIZ-DEV/pi-cc-ui.git ~/.pi/agent/extensions/arda-pi-ui
 ```
 
-Alternatively, as a pi package (requires the `pi-package` keyword, included):
+Restart Pi or use `/reload` after changing the extension. Do not keep both `cc-ui` and `arda-pi-ui` loaded. If your Pi configuration explicitly points to the old directory, update that reference yourself.
 
-```sh
-pi install git:github.com/ArdaYILDIZ-DEV/pi-cc-ui
-```
+## Working row and cache timer
 
-Pi will load and activate the extension on its next start or reload.
-
-## Features
-
-- **Compact spinner row:** Animated glyph (`· ✢ ✳ ✶ ✻ ✽`), Turkish action verbs, token counters, live streaming generation speed (`tok/s`), elapsed turn time, and a simple thinking status.
-- **Git status & prompt cache TTL bar:** Displays git branch, modified file count, and open pull request on the left (`main* · 3 dosya`), alongside the right-aligned `36sn / 5dk` cache TTL counter immediately below the editor (`placement: "belowEditor"`).
-- **Proximity color shifting:** The counter smoothly interpolates from fresh green (`#4EBA65`) through yellow and orange, darkening into deep crimson red (`RGB 140, 18, 18`) as 5 minutes approaches, with the `/ 5dk` deadline highlighted in red.
-- **Audio warning alerts:** Plays non-blocking audio notifications as cache TTL milestones pass:
-  - 3. dakika: `3.mp3` (1 kez)
-  - 1. dakika: `4.mp3` (1 kez)
-  - 4.30. dakika: `4.mp3` (2 kez)
-- **Slash command:** `/cache` displays exact elapsed/remaining time; `/cache toggle` shows or hides the counter; `/cache sound` toggles sound alerts; `/cache sound test` plays a test sound.
-- **Git commands:** `/git` shows repository status, branch, and open PR; `/git refresh` forces an immediate background update.
-- **Compact tool renderers & Claude diff:** Every tool renders as `● Label(detail)` with a one-line `└ summary`. The `edit` tool adds Claude Code diff styling with green/red backgrounds, word-level diffs, `<lineNum> <sign> <code>` gutters, and syntax highlighting. Toggle with `/cc-tools`.
+- The existing spinner, Turkish action verbs, elapsed time and thinking indicator are preserved.
+- `tok/s` prefers provider-reported output increments. It excludes the first chunk's unknown generation time, final delivery delay and gaps between requests. Providers without live usage use a character-based estimate until final output tokens calibrate it; those rates remain estimates.
+- `cache %` is the latest assistant response's cache-read share of input + cache-read + cache-write tokens on the active session branch. Unknown cache statistics are omitted.
+- The five-minute `ttl` counter is a **local activity-based reminder**, not proof of provider cache expiry. Provider retention policies vary.
+- Audio reminders remain at 3 minutes (once), 4 minutes (once), and 4 minutes 30 seconds (twice). Playback uses an available `mpv`, `ffplay`, or macOS `afplay`; no player is installed automatically.
+- High context usage and an expired timer retain a warning color. Other footer information uses muted text with a restrained orange accent.
 
 ## Commands
 
 | Command | Action |
 | --- | --- |
-| `/cache` | Shows prompt cache TTL elapsed time, remaining seconds, and status notification |
-| `/cache toggle` | Toggles the sub-editor counter widget on or off |
-| `/cache sound` | Toggles audio warning alerts on or off (`sound on` / `sound off`) |
-| `/cache sound test` | Plays the 3-minute warning sound immediately to test audio output |
-| `/git` | Shows current git repository branch, modified file count, and open pull request |
-| `/git refresh` | Forces an immediate background refresh of git and pull request state |
-| `/cc-tools` | Shows compact tool renderer status |
-| `/cc-tools on` / `/cc-tools off` / `/cc-tools toggle` | Enables or disables compact tool renderers dynamically |
+| `/arda-tools` | Show compact tool-view status |
+| `/arda-tools on`, `off`, `toggle` | Enable, disable or toggle compact tool views |
+| `/cc-tools` | Compatibility alias for `/arda-tools` |
+| `/cache` | Show elapsed/remaining timer time and audio status |
+| `/cache toggle` | Show or hide the TTL segment |
+| `/cache sound` | Toggle audio reminders; also accepts `on` and `off` |
+| `/cache sound test` | Test reminder playback |
+| `/git` | Show branch, changed-file count and cached open-PR information |
+| `/git refresh` | Refresh Git and open-PR information explicitly |
 
-## Project structure
+Git refresh skips known read-only builtins. PR lookup is reused until the branch or repository changes, or `/git refresh` is requested.
 
-```text
-.
-├── cache-timer.ts          # 5-minute prompt cache TTL widget with git status integration (below editor)
-├── claude-diff.ts          # Claude Code diff parser, syntax highlighter, and TUI component
-├── git-info.ts             # zero-dependency git repository & pull request tracker
-├── index.ts                # extension entry point registering spinner, git info, cache timer, and tool renderers
-├── package.json            # package configuration and test script
-├── palette.ts              # Claude Code palette colors, truecolor ANSI, and sanitization
-├── pi-compat.ts            # Guarded Pi UI notification compatibility helper
-├── README.md               # project documentation
-├── sounds                  # prompt cache warning audio files (3.mp3, 4.mp3)
-├── spinner.ts              # Lightweight spinner, Turkish action verbs, and live tok/s
-├── word-diff.ts            # Bounded dependency-free word-level diff
-├── tests                   # 187 unit, lifecycle, performance, and security tests
-├── tool-renderers.ts       # Claude-style compact renderers for builtin + custom tools (`/cc-tools`)
-└── tsconfig.json           # TypeScript configuration
-```
+## Pi compatibility
 
-## Testing
+The current path uses the public `setFooter` and `registerToolRenderer` APIs. It does not re-register tools, replace their execution functions, or install a renderer-prototype patch. A reload removes this extension's own legacy patch if one remains from the previous version. Expanded custom views and image renderers are retained. Compact views honor Pi 1.1's `outputPad` setting.
 
-Run typecheck and the test suite:
+UI finalization stays on `agent_settled`: `agent_end` can precede retries, compaction or continuations. The `before_provider_request` handler is an observer and does not replace provider payloads.
+
+Older render helpers and prototype-patch exports remain as compatibility utilities, but older hosts are not part of the verified support range. Existing exported Claude-named tool helpers remain available; new callers can use `setToolsEnabled` and `isToolsEnabled`. Diff symbols are now in `tool-diff.ts`, with old symbol names exported as aliases; the old file path is no longer present.
+
+Only `setStatus` entries can be consolidated automatically. Other extensions' editor widgets and custom footers are separate APIs and are not intercepted. If another extension installs its own footer later, that footer takes precedence.
+
+## Development
 
 ```sh
+npm ci --ignore-scripts --no-audit --no-fund
 npm run typecheck
 npm test
 ```
 
+Main modules: `footer.ts`, `spinner.ts`, `cache-timer.ts`, `git-info.ts`, `tool-renderers.ts`, `tool-diff.ts`, `palette.ts`, and `word-diff.ts`. The entry point is `index.ts`; regression tests live in `tests/`.
+
 ## License
 
-MIT
+The package manifest declares MIT. A standalone license file is not included.
