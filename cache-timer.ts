@@ -12,7 +12,6 @@ import type {
 	ExtensionContext,
 	MessageEndEvent,
 	Theme,
-	ThemeColor,
 	TurnEndEvent,
 } from "@earendil-works/pi-coding-agent";
 import * as PiTui from "@earendil-works/pi-tui";
@@ -22,6 +21,10 @@ import {
 	rgb,
 	rgbTo256,
 	resolvePalette,
+	resolveThemeAppearance,
+	resolveThemeColorMode,
+	themeText,
+	fg as paletteFg,
 	visibleWidth,
 	sanitizeControlChars,
 	stripAnsi,
@@ -414,6 +417,8 @@ export interface CacheTimerFrameState {
 
 export interface CacheTimerPaint {
 	readonly colorize: (text: string, color: Rgb) => string;
+	/** Semantic success → warning → error ramp supplied by the host theme. */
+	readonly ttlColor?: (text: string, ratio: number) => string;
 	readonly dim: (text: string) => string;
 	readonly accent: (text: string) => string;
 	readonly red: (text: string) => string;
@@ -477,7 +482,8 @@ export function buildCacheTimerLine(
 	const color = getCacheColor(ratio, paint.scheme);
 	const elapsedText = formatCacheElapsed(effectiveElapsed);
 
-	const fullBadge = `${paint.colorize(elapsedText, color)} ${paint.dim("/")} ${paint.red("5dk")}`;
+	const paintElapsed = (text: string) => paint.ttlColor ? paint.ttlColor(text, ratio) : paint.colorize(text, color);
+	const fullBadge = `${paintElapsed(elapsedText)} ${paint.dim("/")} ${paint.red("5dk")}`;
 	const rawBadge = `${elapsedText} / 5dk`;
 	const badgeWidth = visibleWidth(rawBadge);
 
@@ -486,10 +492,10 @@ export function buildCacheTimerLine(
 		const shortWidth = visibleWidth(elapsedText);
 		if (availableWidth >= shortWidth) {
 			const pad = Math.max(0, availableWidth - shortWidth);
-			return " ".repeat(pad) + paint.colorize(elapsedText, color);
+			return " ".repeat(pad) + paintElapsed(elapsedText);
 		}
 		const trunc = truncateToWidth(elapsedText, availableWidth);
-		return paint.colorize(trunc, color);
+		return paintElapsed(trunc);
 	}
 
 	// When git summary is also present, format dual layout: git on left, TTL on right
@@ -553,7 +559,7 @@ export class CacheTimerController {
 	private gitInfoProvider: (() => string | null) | null = null;
 	private readonly firedMilestones = new Set<string>();
 	private consecutiveWidgetErrors = 0;
-	private cachedThemeName: string | undefined = undefined;
+	private cachedTheme: Theme | undefined;
 	private cachedPaint: CacheTimerPaint | null = null;
 	private readonly ttlMs: number = DEFAULT_CACHE_TTL_MS;
 	private lastCtx: UiCtx | null = null;
@@ -732,71 +738,28 @@ export class CacheTimerController {
 	}
 
 	public paintFor(theme?: Theme): CacheTimerPaint {
-		const themeName =
-			theme && typeof theme === "object" && typeof theme.name === "string"
-				? theme.name
-				: undefined;
-		if (this.cachedPaint !== null && this.cachedThemeName === themeName) {
-			return this.cachedPaint;
-		}
+		if (this.cachedPaint !== null && this.cachedTheme === theme) return this.cachedPaint;
 
-		const pal = resolvePalette(themeName, (token) => {
-			try {
-				if (theme && typeof theme === "object" && typeof theme.fg === "function") {
-					const res = theme.fg(token as ThemeColor, "x");
-					return typeof res === "string" ? res : undefined;
-				}
-				return undefined;
-			} catch {
-				return undefined;
-			}
-		});
-
-		const scheme = pal.scheme;
-		const colorMode = pal.colorMode;
-
+		const scheme = resolveThemeAppearance(theme);
+		const palette = resolvePalette(scheme);
+		const colorMode = resolveThemeColorMode(theme);
 		const paint: CacheTimerPaint = {
 			colorize: (text, c) => colorizeRgb(text, c, colorMode),
-			dim: (text) => {
-				try {
-					if (theme && typeof theme === "object" && typeof theme.fg === "function") {
-						const res = theme.fg("dim", text);
-						if (typeof res === "string" && res.includes(text)) return res;
-					}
-					return `\x1b[2m${text}\x1b[22m`;
-				} catch {
-					return `\x1b[2m${text}\x1b[22m`;
-				}
-			},
-			accent: (text) => {
-				try {
-					if (theme && typeof theme === "object" && typeof theme.fg === "function") {
-						const res = theme.fg("accent", text);
-						if (typeof res === "string" && res.includes(text)) return res;
-					}
-					return `\x1b[38;2;215;119;87m${text}\x1b[39m`;
-				} catch {
-					return `\x1b[38;2;215;119;87m${text}\x1b[39m`;
-				}
-			},
-			red: (text) => {
-				try {
-					if (theme && typeof theme === "object" && typeof theme.fg === "function") {
-						const res = theme.fg("error", text);
-						if (typeof res === "string" && res.includes(text)) return res;
-					}
-					return scheme === "light"
-						? `\x1b[38;2;198;40;40m${text}\x1b[39m`
-						: `\x1b[38;2;255;107;128m${text}\x1b[39m`;
-				} catch {
-					return `\x1b[38;2;255;107;128m${text}\x1b[39m`;
-				}
-			},
+			ttlColor: theme && typeof theme.colors === "object" ? (text, ratio) => {
+				const colors = theme.colors;
+				const color = ratio <= 0.6
+					? PiTui.mixColors(colors.success, colors.warning, ratio / 0.6, "srgb")
+					: PiTui.mixColors(colors.warning, colors.error, (ratio - 0.6) / 0.4, "srgb");
+				return PiTui.styleText(text, { fg: color }, colorMode);
+			} : undefined,
+			dim: (text) => themeText(theme, "dim", text, (value) => `\x1b[2m${value}\x1b[22m`),
+			accent: (text) => themeText(theme, "accent", text, (value) => paletteFg(palette.cc.claude, value, colorMode)),
+			red: (text) => themeText(theme, "error", text, (value) => paletteFg(palette.cc.error, value, colorMode)),
 			scheme,
 			colorMode,
 		};
 
-		this.cachedThemeName = themeName;
+		this.cachedTheme = theme;
 		this.cachedPaint = paint;
 		return paint;
 	}

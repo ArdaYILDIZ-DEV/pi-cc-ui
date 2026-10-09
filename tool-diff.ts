@@ -3,7 +3,7 @@
  *
  * Renders diffs with:
  * - Line numbers and signs: `<lineNum> <sign> <code>` (e.g. `60 + `, `54 - `, `61   `)
- * - Full-width solid backgrounds (dark green `#0d3516` for added, dark red `#420c10` for removed)
+ * - Full-width backgrounds derived from the active theme's diff colors and tool surfaces
  * - Bounded, dependency-free intra-line token diffing with highlighted word backgrounds
  * - Syntax highlighting via Pi theme & highlightCode
  * - Responsive terminal width padding and line wrapping with continuation gutter
@@ -19,6 +19,8 @@ import {
 	FG_DEFAULT,
 	RESET,
 	resolvePalette,
+	resolveThemeAppearance,
+	resolveThemeColorMode,
 	visibleWidth as paletteVisibleWidth,
 } from "./palette.ts";
 
@@ -74,7 +76,19 @@ export interface DiffThemeColors {
 export function getDiffThemeColors(
 	theme?: Theme | { name?: string },
 ): DiffThemeColors {
-	const palette = resolvePalette(theme?.name);
+	if (theme && "colors" in theme) {
+		const colors = theme.colors;
+		return {
+			diffAddedBg: PiTui.colorToHex(PiTui.mixColors(colors.toolSuccessBg, colors.toolDiffAdded, 0.12, "srgb")),
+			diffAddedWord: PiTui.colorToHex(PiTui.mixColors(colors.toolSuccessBg, colors.toolDiffAdded, 0.28, "srgb")),
+			diffAddedGutter: PiTui.colorToHex(colors.toolDiffAdded),
+			diffRemovedBg: PiTui.colorToHex(PiTui.mixColors(colors.toolErrorBg, colors.toolDiffRemoved, 0.12, "srgb")),
+			diffRemovedWord: PiTui.colorToHex(PiTui.mixColors(colors.toolErrorBg, colors.toolDiffRemoved, 0.28, "srgb")),
+			diffRemovedGutter: PiTui.colorToHex(colors.toolDiffRemoved),
+			diffContextGutter: PiTui.colorToHex(colors.toolDiffContext),
+		};
+	}
+	const palette = resolvePalette(resolveThemeAppearance(theme));
 	if (palette.scheme === "light") {
 		return {
 			diffAddedBg: "#D7EAD9",
@@ -344,6 +358,10 @@ export function renderToolDiffLines(
 	pairIntraLineDiffs(lines);
 
 	const colors = getDiffThemeColors(theme);
+	const colorMode = resolveThemeColorMode(theme);
+	const tokenFg = (role: "toolDiffAdded" | "toolDiffRemoved" | "toolDiffContext" | "toolOutput", fallback: string) =>
+		theme && "getFgAnsi" in theme && typeof theme.getFgAnsi === "function" ? theme.getFgAnsi(role) : fallback;
+	const codeFg = tokenFg("toolOutput", FG_DEFAULT);
 	const rawWidth = width ??
 		(typeof process !== "undefined" && process.stdout?.columns ? process.stdout.columns : 80);
 	if (!Number.isFinite(rawWidth) || rawWidth < 1) return [];
@@ -362,22 +380,22 @@ export function renderToolDiffLines(
 				: String(line.lineNum).padStart(maxNumWidth, " ");
 
 		if (line.type === "added") {
-			const baseBg = bgAnsi(colors.diffAddedBg);
-			const wordBg = bgAnsi(colors.diffAddedWord);
-			const gutterFg = fgAnsi(colors.diffAddedGutter);
+			const baseBg = bgAnsi(colors.diffAddedBg, colorMode);
+			const wordBg = bgAnsi(colors.diffAddedWord, colorMode);
+			const gutterFg = tokenFg("toolDiffAdded", fgAnsi(colors.diffAddedGutter, colorMode));
 			const code = line.wordParts
 				? applyIntraLineBg(line.highlighted, line.wordParts, true, baseBg, wordBg)
 				: line.highlighted;
 
 			const wrapped =
 				line.cleanContent.length > 0
-					? wrapTextWithAnsi(baseBg + code, availCodeWidth)
+					? wrapTextWithAnsi(baseBg + codeFg + code, availCodeWidth)
 					: [""];
 
 			for (let r = 0; r < wrapped.length; r++) {
 				const g =
 					r === 0
-						? `${baseBg}${gutterFg}${paddedNum} + ${FG_DEFAULT}`
+						? `${baseBg}${gutterFg}${paddedNum} + ${codeFg}`
 						: `${baseBg}${" ".repeat(gutterWidth)}`;
 				const row = g + wrapped[r]!;
 				const visLen = visibleWidth(row);
@@ -385,22 +403,22 @@ export function renderToolDiffLines(
 				output.push(`${row}${baseBg}${" ".repeat(pad)}${RESET}`);
 			}
 		} else if (line.type === "removed") {
-			const baseBg = bgAnsi(colors.diffRemovedBg);
-			const wordBg = bgAnsi(colors.diffRemovedWord);
-			const gutterFg = fgAnsi(colors.diffRemovedGutter);
+			const baseBg = bgAnsi(colors.diffRemovedBg, colorMode);
+			const wordBg = bgAnsi(colors.diffRemovedWord, colorMode);
+			const gutterFg = tokenFg("toolDiffRemoved", fgAnsi(colors.diffRemovedGutter, colorMode));
 			const code = line.wordParts
 				? applyIntraLineBg(line.highlighted, line.wordParts, false, baseBg, wordBg)
 				: line.highlighted;
 
 			const wrapped =
 				line.cleanContent.length > 0
-					? wrapTextWithAnsi(baseBg + code, availCodeWidth)
+					? wrapTextWithAnsi(baseBg + codeFg + code, availCodeWidth)
 					: [""];
 
 			for (let r = 0; r < wrapped.length; r++) {
 				const g =
 					r === 0
-						? `${baseBg}${gutterFg}${paddedNum} - ${FG_DEFAULT}`
+						? `${baseBg}${gutterFg}${paddedNum} - ${codeFg}`
 						: `${baseBg}${" ".repeat(gutterWidth)}`;
 				const row = g + wrapped[r]!;
 				const visLen = visibleWidth(row);
@@ -408,22 +426,22 @@ export function renderToolDiffLines(
 				output.push(`${row}${baseBg}${" ".repeat(pad)}${RESET}`);
 			}
 		} else if (line.type === "context") {
-			const gutterFg = fgAnsi(colors.diffContextGutter);
+			const gutterFg = tokenFg("toolDiffContext", fgAnsi(colors.diffContextGutter, colorMode));
 			const wrapped =
 				line.cleanContent.length > 0
-					? wrapTextWithAnsi(line.highlighted, availCodeWidth)
+					? wrapTextWithAnsi(codeFg + line.highlighted, availCodeWidth)
 					: [""];
 
 			for (let r = 0; r < wrapped.length; r++) {
 				const g =
 					r === 0
-						? `${gutterFg}${paddedNum}   ${FG_DEFAULT}`
+						? `${gutterFg}${paddedNum}   ${codeFg}`
 						: " ".repeat(gutterWidth);
 				output.push(g + wrapped[r]!);
 			}
 		} else {
 			// ellipsis
-			const gutterFg = fgAnsi(colors.diffContextGutter);
+			const gutterFg = tokenFg("toolDiffContext", fgAnsi(colors.diffContextGutter, colorMode));
 			output.push(
 				`${" ".repeat(gutterWidth)}${gutterFg}${line.content}${FG_DEFAULT}`,
 			);

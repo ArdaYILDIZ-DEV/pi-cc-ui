@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { buildFooterLines, registerFooter, type FooterState } from "../footer.ts";
 import { CacheTimerController } from "../cache-timer.ts";
@@ -20,7 +20,8 @@ const state: FooterState = {
 
 const paint = { accent: (s: string) => s, muted: (s: string) => s, warning: (s: string) => s };
 
-function mountFooter(entries: unknown[], branch = "main", git?: GitInfoController) {
+function mountFooter(entries: unknown[], branch = "main", git?: GitInfoController,
+	theme: Pick<Theme, "fg"> = { fg: (_color, text) => text }) {
 	let component: { render(width: number): string[]; dispose(): void } | undefined;
 	let start: Function | undefined;
 	const ctx = {
@@ -28,7 +29,7 @@ function mountFooter(entries: unknown[], branch = "main", git?: GitInfoControlle
 		getContextUsage: () => state.context,
 		sessionManager: { getSessionId: () => "session", getLeafId: () => "leaf", getEntries: () => entries, getBranch: () => entries },
 		ui: { setFooter: (factory: Function) => {
-			component = factory({ requestRender: () => {} }, { fg: (_color: string, text: string) => text }, {
+			component = factory({ requestRender: () => {} }, theme, {
 				getGitBranch: () => branch, getExtensionStatuses: () => new Map(), onBranchChange: () => () => {},
 			});
 		} },
@@ -139,11 +140,23 @@ describe("minimal footer", () => {
 		assert.ok(lines[1].includes("quota 100%"));
 	});
 
-	it("applies the muted orange accent without preserving foreign status colors", () => {
+	it("uses the default Claude accent without preserving foreign status colors", () => {
 		const lines = buildFooterLines({ ...state, statuses: new Map([["quota", "\x1b[31mcodex 100%\x1b[0m"]]) }, 160);
-		assert.ok(lines[0].includes("\x1b[38;2;205;151;112m"));
+		assert.ok(lines[0].includes("\x1b[38;2;215;119;87m"));
 		assert.ok(!lines[1].includes("\x1b[31m"));
 		assert.equal(stripAnsi(lines[1]), "codex 100%");
+	});
+
+	it("uses the active theme accent rather than a fixed orange", () => {
+		let color = "215;119;87";
+		const themed = { fg: (role: string, text: string) => role === "accent" ? `\x1b[38;2;${color}m${text}\x1b[39m` : text };
+		const component = mountFooter([], "main", undefined, themed);
+		const first = component.render(160)[0];
+		assert.ok(first.includes("\x1b[38;2;215;119;87m"));
+		assert.ok(!first.includes("\x1b[38;2;205;151;112m"));
+		color = "1;2;3";
+		assert.ok(component.render(160)[0].includes("\x1b[38;2;1;2;3m"));
+		component.dispose();
 	});
 
 	it("installs through the footer API, reads changing data and removes only its own widget", async () => {
@@ -158,7 +171,10 @@ describe("minimal footer", () => {
 		const entries: unknown[] = [{ type: "message", message: { role: "assistant", usage: { input: 22, cacheRead: 78, cacheWrite: 0, cost: { total: 0.1 } } } }];
 		let leaf = "leaf";
 		let contextUsage: FooterState["context"] = state.context;
-		const currentTheme = { name: "dark", fg: (_color: string, text: string) => text };
+		const currentTheme = {
+			name: "dark", accent: "215;119;87",
+			fg: (role: string, text: string) => role === "accent" ? `\x1b[38;2;${currentTheme.accent}m${text}\x1b[39m` : text,
+		};
 		const ctx = {
 			hasUI: true, cwd: "/tmp/project", model: { name: "Test model", id: "test", reasoning: true, contextWindow: 500_000 }, thinkingLevel: "low",
 			getContextUsage: () => contextUsage,
@@ -200,7 +216,8 @@ describe("minimal footer", () => {
 		leaf = "unknown-price";
 		assert.ok(stripAnsi(component.render(160)[0]).endsWith("$? est"));
 		currentTheme.name = "light";
-		assert.ok(component.render(160)[0].includes("\x1b[38;2;151;85;47m"));
+		currentTheme.accent = "184;78;45";
+		assert.ok(component.render(160)[0].includes("\x1b[38;2;184;78;45m"));
 		component.dispose();
 		component.dispose();
 		assert.equal(unsubscribed, 1);

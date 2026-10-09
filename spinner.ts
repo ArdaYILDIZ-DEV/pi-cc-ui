@@ -12,11 +12,13 @@ import type {
 	MessageEndEvent,
 	MessageUpdateEvent,
 	Theme,
-	ThemeColor,
 } from "@earendil-works/pi-coding-agent";
 import {
 	fg as paletteFg,
 	resolvePalette,
+	resolveThemeAppearance,
+	resolveThemeColorMode,
+	themeText,
 	visibleWidth,
 	sanitizeControlChars,
 	sanitizeTitle,
@@ -151,9 +153,9 @@ export function currentWorkingVerb(): string {
 
 /** Color functions for one frame — resolved from the *live* theme each tick. */
 export interface SpinnerPaint {
-	/** claude brand orange (CC messageColor 'claude'). */
+	/** Active theme's accent, with a standalone fallback. */
 	readonly accent: (s: string) => string;
-	/** claude shimmer (CC shimmerColor 'claudeShimmer'). */
+	/** Accent painter retained for callers using the shimmer interface. */
 	readonly shimmer: (s: string) => string;
 	/** CC's dimColor. */
 	readonly dim: (s: string) => string;
@@ -643,7 +645,7 @@ export class SpinnerController {
 	private thinkingClearTimer: ReturnType<typeof setTimeout> | null = null;
 	private repaintTimer: ReturnType<typeof setTimeout> | null = null;
 	private verb: string = sampleVerb();
-	private cachedThemeName: string | undefined = undefined;
+	private cachedTheme: Theme | undefined;
 	private cachedPaint: SpinnerPaint | null = null;
 
 	// Live streaming token rate tracking
@@ -769,48 +771,19 @@ export class SpinnerController {
 	}
 
 	public paintFor(theme?: Theme): SpinnerPaint {
-		const themeName =
-			theme && typeof theme === "object" && typeof theme.name === "string"
-				? theme.name
-				: undefined;
-		if (this.cachedPaint !== null && this.cachedThemeName === themeName) {
-			return this.cachedPaint;
-		}
+		if (this.cachedPaint !== null && this.cachedTheme === theme) return this.cachedPaint;
 
-		const pal = resolvePalette(themeName, (token) => {
-			try {
-				if (theme && typeof theme === "object" && typeof theme.fg === "function") {
-					const res = theme.fg(token as ThemeColor, "x");
-					return typeof res === "string" ? res : undefined;
-				}
-				return undefined;
-			} catch {
-				return undefined;
-			}
-		});
-		const scheme = pal.scheme;
-		const accentColor = pal.cc.claude;
-		const shimmerColor = pal.cc.claudeShimmer;
-		const colorMode = pal.colorMode;
-
+		const scheme = resolveThemeAppearance(theme);
+		const pal = resolvePalette(scheme);
+		const colorMode = resolveThemeColorMode(theme);
 		const paint: SpinnerPaint = {
-			accent: (s) => paletteFg(accentColor, s, colorMode),
-			shimmer: (s) => paletteFg(shimmerColor, s, colorMode),
-			dim: (s) => {
-				try {
-					if (theme && typeof theme === "object" && typeof theme.fg === "function") {
-						const res = theme.fg("dim", s);
-						if (typeof res === "string" && res.includes(s)) return res;
-					}
-					return `\x1b[2m${s}\x1b[22m`;
-				} catch {
-					return `\x1b[2m${s}\x1b[22m`;
-				}
-			},
-			thinking: (s, timeMs) => thinkingGlowPaint(timeMs, scheme)(s),
+			accent: (s) => themeText(theme, "accent", s, (text) => paletteFg(pal.cc.claude, text, colorMode)),
+			shimmer: (s) => themeText(theme, "accent", s, (text) => paletteFg(pal.cc.claudeShimmer, text, colorMode)),
+			dim: (s) => themeText(theme, "dim", s, (text) => `\x1b[2m${text}\x1b[22m`),
+			thinking: (s, timeMs) => themeText(theme, "thinkingText", s, thinkingGlowPaint(timeMs, scheme)),
 		};
 
-		this.cachedThemeName = themeName;
+		this.cachedTheme = theme;
 		this.cachedPaint = paint;
 		return paint;
 	}

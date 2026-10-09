@@ -48,9 +48,9 @@ function formatCost(cost: number | null): string {
 }
 
 function footerPaint(theme?: Theme): FooterPaint {
-	const light = resolvePalette(theme?.name).scheme === "light";
+	const palette = resolvePalette(theme?.name);
 	return {
-		accent: (text) => fg(light ? "#97552f" : "#cd9770", text),
+		accent: (text) => theme ? theme.fg("accent", text) : fg(palette.cc.claude, text),
 		muted: (text) => theme ? theme.fg("muted", text) : fg("#a0a0a0", text),
 		warning: (text) => theme ? theme.fg("warning", text) : fg("#d4ad75", text),
 	};

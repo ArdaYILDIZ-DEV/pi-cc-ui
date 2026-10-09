@@ -1,7 +1,6 @@
-/**
- * Custom Claude Code Dark Palette & SGR ANSI formatting.
- * Hardcoded directly from /home/arda/.pi/agent/themes/claude-code-dark.json
- */
+/** Theme-aware rendering helpers and standalone fallback palettes. */
+import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
+import { getTerminalColorMode } from "@earendil-works/pi-tui";
 
 export interface Rgb {
 	readonly r: number;
@@ -584,6 +583,44 @@ export function bg(
 ): string {
 	if (typeof text !== "string" || text === "") return "";
 	return `${bgAnsi(color, mode)}${text}${BG_DEFAULT}`;
+}
+
+let themeFallbackWarningLogged = false;
+
+/** Host appearance takes precedence over legacy name-only fallback detection. */
+export function resolveThemeAppearance(theme?: Theme | { name?: string }): "dark" | "light" {
+	if (theme && "appearance" in theme && (theme.appearance === "dark" || theme.appearance === "light")) {
+		return theme.appearance;
+	}
+	return resolvePalette(theme?.name).scheme;
+}
+
+/** Use the host's encoding, including 256-color terminals. */
+export function resolveThemeColorMode(theme?: Theme | { name?: string }): ColorMode {
+	return theme && "getColorMode" in theme && typeof theme.getColorMode === "function"
+		? theme.getColorMode() : getTerminalColorMode();
+}
+
+/** Theme calls are a UI boundary; a broken host painter must not break status rendering. */
+export function themeText(
+	theme: Theme | undefined,
+	role: ThemeColor,
+	text: string,
+	fallback: (text: string) => string,
+): string {
+	if (theme && typeof theme.fg === "function") {
+		try {
+			const painted = theme.fg(role, text);
+			if (typeof painted === "string" && painted.includes(text)) return painted;
+		} catch {
+			// Report once below; do not include possibly sensitive theme payloads.
+		}
+		if (!themeFallbackWarningLogged) {
+			themeFallbackWarningLogged = true;
+			console.warn("[arda-pi-ui] Theme painter unavailable; using fallback status colors.");
+		}
+	}
+	return fallback(text);
 }
 
 export interface ResolvedPalette {
