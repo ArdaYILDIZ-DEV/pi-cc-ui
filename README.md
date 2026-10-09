@@ -17,10 +17,10 @@ On narrower terminals, complete TTL, cache, Git and folder segments are dropped 
 
 Requires Node.js 22.19+ and Pi 1.1.x or newer within the 1.x series. Typecheck and tests are verified against Pi 1.1.0; later releases are not a compatibility guarantee.
 
-Pi discovers this directory under `~/.pi/agent/extensions/arda-pi-ui/`. The Git repository URL retains its original name:
+Pi discovers this directory under `~/.pi/agent/extensions/arda-pi-ui/`:
 
 ```sh
-git clone https://github.com/ArdaYILDIZ-DEV/pi-cc-ui.git ~/.pi/agent/extensions/arda-pi-ui
+git clone https://github.com/ArdaYILDIZ-DEV/arda-pi-ui.git ~/.pi/agent/extensions/arda-pi-ui
 ```
 
 Restart Pi or use `/reload` after changing the extension. Do not keep both `cc-ui` and `arda-pi-ui` loaded. If your Pi configuration explicitly points to the old directory, update that reference yourself.
