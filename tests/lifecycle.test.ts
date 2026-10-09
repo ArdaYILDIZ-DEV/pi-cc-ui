@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { registerSpinner, SpinnerController } from "../spinner.ts";
+import { registerSpinner } from "../spinner.ts";
 import type {
 	ExtensionAPI,
 	ExtensionContext,

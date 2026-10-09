@@ -111,6 +111,15 @@ describe("palette", () => {
 		assert.equal(visibleWidth("cafe\u0301"), 4); // decomposed e + acute normalized to NFC
 	});
 
+	it("measures grapheme clusters rather than individual emoji code points", () => {
+		for (const text of ["👨‍👩‍👧‍👦", "🇹🇷", "👍🏽", "❤️", "✨", "가"]) {
+			assert.equal(visibleWidth(text), 2, text);
+			assert.equal(visibleWidth(`\x1b[31m${text}\x1b[0m`), 2, text);
+		}
+		assert.equal(visibleWidth("a\u202eb"), 2);
+		assert.equal(visibleWidth("a\x90hidden\x9cb"), 2);
+	});
+
 	it("resolvePalette returns Claude Code Dark palette by default", () => {
 		const pal = resolvePalette();
 		assert.equal(pal.scheme, "dark");

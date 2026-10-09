@@ -6,10 +6,7 @@
  * and optional GitHub open Pull Request info via `gh pr view`.
  */
 import { execFile } from "node:child_process";
-import type {
-	ExtensionAPI,
-	ExtensionContext,
-} from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { sanitizeControlChars, stripAnsi } from "./palette.ts";
 import { notifySafely } from "./pi-compat.ts";
 

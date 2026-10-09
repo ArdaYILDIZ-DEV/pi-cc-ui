@@ -576,7 +576,7 @@ export class CacheTimerController {
 		const rawTtl =
 			typeof ttlMsOrOptions === "number" ? ttlMsOrOptions : opts.ttlMs;
 		this.ttlMs =
-			typeof rawTtl === "number" && rawTtl > 0 ? rawTtl : DEFAULT_CACHE_TTL_MS;
+			typeof rawTtl === "number" && Number.isFinite(rawTtl) && rawTtl > 0 ? rawTtl : DEFAULT_CACHE_TTL_MS;
 		this.isSoundEnabled = opts.soundEnabled ?? true;
 		if (typeof opts.soundPlayer === "function") {
 			this.soundPlayer = opts.soundPlayer;

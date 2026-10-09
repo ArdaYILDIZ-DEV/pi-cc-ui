@@ -21,10 +21,11 @@ import {
 	resolvePalette,
 	resolveThemeAppearance,
 	resolveThemeColorMode,
-	visibleWidth as paletteVisibleWidth,
+	sanitizeControlChars,
+	stripAnsi,
+	visibleWidth,
 } from "./palette.ts";
 
-const visibleWidth = paletteVisibleWidth;
 let compatibilityWarningLogged = false;
 
 function warnCompatibilityFallback(feature: string, error?: unknown): void {
@@ -143,7 +144,7 @@ export function parseDiffText(diffText: string): {
 	for (const rawLine of rawLines) {
 		const match = rawLine.match(/^([+-\s])(\s*\d*)\s(.*)$/);
 		if (!match) {
-			const trimmed = rawLine.trim();
+			const trimmed = sanitizeControlChars(stripAnsi(rawLine)).trim();
 			if (trimmed.length > 0) {
 				lines.push({
 					type: "ellipsis",
@@ -158,7 +159,7 @@ export function parseDiffText(diffText: string): {
 		const prefix = match[1]!;
 		const numStr = match[2]!.trim();
 		const content = match[3] ?? "";
-		const cleanContent = content.replace(/\t/g, "   ");
+		const cleanContent = sanitizeControlChars(stripAnsi(content).replace(/\t/g, "   "));
 		const lineNum = numStr.length > 0 ? parseInt(numStr, 10) : undefined;
 
 		if (lineNum !== undefined && !Number.isNaN(lineNum) && lineNum > maxLineNum) {
@@ -215,6 +216,21 @@ export function getWordRanges(
 	return ranges;
 }
 
+function sgrResetsBackground(parameters: string): boolean {
+	const codes = parameters.split(";");
+	for (let i = 0; i < codes.length; i++) {
+		const code = Number(codes[i]!.split(":")[0]);
+		if (code === 0 || code === 49) return true;
+		if ((code === 38 || code === 48 || code === 58) && !codes[i]!.includes(":")) {
+			// Extended-color components (including 0 and 49) are not SGR reset codes.
+			const mode = Number(codes[++i]);
+			if (mode === 2) i += 3;
+			else if (mode === 5) i++;
+		}
+	}
+	return false;
+}
+
 /**
  * Injects token-level word background escape codes into a syntax-highlighted line
  * without corrupting active foreground styling.
@@ -237,9 +253,10 @@ export function applyIntraLineBg(
 
 	while (j < highlightedLine.length) {
 		if (highlightedLine[j] === "\x1b") {
-			const match = highlightedLine.slice(j).match(/^\x1b\[[0-9;]*m/);
+			const match = highlightedLine.slice(j).match(/^\x1b\[([0-9;:]*)m/);
 			if (match) {
 				result += match[0];
+				if (sgrResetsBackground(match[1]!)) result += inHighlight ? wordBg : baseBg;
 				j += match[0].length;
 				continue;
 			}
@@ -443,7 +460,7 @@ export function renderToolDiffLines(
 			// ellipsis
 			const gutterFg = tokenFg("toolDiffContext", fgAnsi(colors.diffContextGutter, colorMode));
 			output.push(
-				`${" ".repeat(gutterWidth)}${gutterFg}${line.content}${FG_DEFAULT}`,
+				`${" ".repeat(gutterWidth)}${gutterFg}${line.cleanContent}${FG_DEFAULT}`,
 			);
 		}
 	}

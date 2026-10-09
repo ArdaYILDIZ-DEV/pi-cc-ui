@@ -733,6 +733,7 @@ export class SpinnerController {
 			this.timer = null;
 		}
 		this.clearRepaintTimer();
+		this.clearThinkingTimers();
 	}
 
 	public beginThinking(): void {

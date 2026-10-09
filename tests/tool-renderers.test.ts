@@ -349,6 +349,23 @@ describe("compact tool presentation", () => {
 		assert.notEqual(tool.renderResult!(result, options, theme, { ...context, isError: true } as never), original);
 	});
 
+	it("strips unsafe terminal controls from compact calls, warnings and fallback output", () => {
+		const payload = "\x1b]52;c;YQ==\x07\x1b[2J\x90hidden\x9c";
+		const tool = renderer("custom");
+		const call = tool.renderCall!({ text: `before${payload}after` }, theme, context as never);
+		const expandedCall = tool.renderCall!({ text: `before${payload}after` }, theme, { ...context, expanded: true } as never);
+		const value = { content: [{ type: "text" as const, text: `before${payload}after\n\x1b[31msecond\x1b[39m` }], details: { fullOutputPath: `/tmp/${payload}output` } };
+		for (const expanded of [false, true]) {
+			const output = tool.renderResult!(value, { ...options, expanded }, theme, { ...context, isError: true } as never);
+			for (const component of [call, expandedCall, output]) {
+				const rows = component.render(160).join("\n");
+				assert.ok(!rows.includes("52;c;") && !rows.includes("\x1b[2J") && !rows.includes("hidden"));
+				assert.ok(rows.includes("beforeafter"));
+			}
+			if (expanded) assert.ok(output.render(160).join("\n").includes("\x1b[31msecond"));
+		}
+	});
+
 	it("keeps all available error lines accessible in the expanded fallback", () => {
 		const output = Array.from({ length: 45 }, (_, i) => `detail ${i + 1}`).join("\n");
 		const text = renderer("custom").renderResult!({ content: [{ type: "text", text: output }], details: {} }, { ...options, expanded: true }, theme, { ...context, isError: true } as never).render(80).join("\n");

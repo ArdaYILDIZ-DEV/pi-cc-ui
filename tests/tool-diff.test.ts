@@ -65,6 +65,17 @@ describe("claude-diff parser and helpers", () => {
 			assert.match(lines[4]!.content, /uploadsDir/);
 		});
 
+		it("removes terminal control payloads from code and unparsed diff lines", () => {
+			const payload = "\x1b]52;c;YQ==\x07\x1b[2J\x90hidden\x9c";
+			const rows = renderToolDiffLines(`+1 safe${payload}tail\n...${payload}end`, "", undefined, 80);
+			assert.ok(rows.length > 0);
+			assert.ok(rows.every((row) => !row.includes("52;c;") && !row.includes("\x1b[2J") && !row.includes("hidden")));
+			assert.ok(stripAnsi(rows.join("\n")).includes("safetail"));
+			assert.ok(stripAnsi(rows.join("\n")).includes("...end"));
+			const parsedEllipsis = renderToolDiffLines(`     ...${payload}end`, "", undefined, 80).join("\n");
+			assert.ok(!parsedEllipsis.includes("52;c;") && !parsedEllipsis.includes("\x1b[2J"));
+		});
+
 		it("handles skipped ellipsis lines", () => {
 			const diffWithEllipsis = `  10 const a = 1;\n     ...\n  50 const b = 2;`;
 			const { lines } = parseDiffText(diffWithEllipsis);
@@ -107,6 +118,22 @@ describe("claude-diff parser and helpers", () => {
 			pairIntraLineDiffs(lines);
 			assert.equal(lines[0]?.wordParts, undefined);
 			assert.equal(lines[1]?.wordParts, undefined);
+		});
+
+		it("preserves word backgrounds across full resets and colon-form SGR", () => {
+			const baseBg = "\x1b[48;2;10;40;10m";
+			const wordBg = "\x1b[48;2;30;80;30m";
+			for (const reset of ["\x1b[0m", "\x1b[m", "\x1b[49m"]) {
+				const input = `foo${reset}bar`;
+				const output = applyIntraLineBg(input, [{ value: "foobar", added: true }], true, baseBg, wordBg);
+				assert.ok(output.includes(`${reset}${wordBg}bar`));
+				assert.equal(stripAnsi(output), "foobar");
+			}
+			const color = "\x1b[38:2::255:0:0m";
+			const output = applyIntraLineBg(`${color}foobar`, [{ value: "foobar", added: true }], true, baseBg, wordBg);
+			assert.equal(output, `${color}${wordBg}foobar${baseBg}`);
+			const rgbColor = "\x1b[38;2;0;49;255m";
+			assert.equal(applyIntraLineBg(`${rgbColor}foobar`, [{ value: "foobar", added: true }], true, baseBg, wordBg), `${rgbColor}${wordBg}foobar${baseBg}`);
 		});
 
 		it("applies intra-line background code around changed word token", () => {

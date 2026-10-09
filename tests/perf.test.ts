@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { performance } from "node:perf_hooks";
 import {
 	formatTokenCount,
-	formatElapsed,
 	glimmerMessage,
 	buildSpinnerLine,
 	thinkingGlowPaint,
@@ -11,7 +10,7 @@ import {
 	registerSpinner,
 	type SpinnerFrameState,
 } from "../spinner.ts";
-import { visibleWidth, stripAnsi, fgAnsi, fg } from "../palette.ts";
+import { visibleWidth, fgAnsi } from "../palette.ts";
 import type { ExtensionAPI, ExtensionContext, MessageUpdateEvent, MessageEndEvent } from "@earendil-works/pi-coding-agent";
 
 describe("performance and hot-path benchmarks", () => {
@@ -176,7 +175,7 @@ describe("stress testing and high-frequency streaming", () => {
 	it("simulates 1,000 rapid message_update streaming events with zero lag and coalesced repaint", async () => {
 		const { pi } = createMockPi();
 		const controller = registerSpinner(pi);
-		const { ctx, workingMessages } = createMockContext();
+		const { ctx } = createMockContext();
 
 		await pi.emit("agent_start", { type: "agent_start" }, ctx);
 

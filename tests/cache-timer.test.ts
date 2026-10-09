@@ -362,6 +362,19 @@ describe("CacheTimerController lifecycle", () => {
 		};
 	}
 
+	it("rejects non-finite and non-positive TTLs consistently with the pure helpers", () => {
+		for (const ttlMs of [Infinity, -Infinity, NaN, 0, -1]) {
+			const controller = new CacheTimerController({ ttlMs, soundEnabled: false });
+			try {
+				assert.equal(controller.getTtlMs(), 300_000);
+				controller.setLastContextTimestamp(Date.now() - 360_000);
+				assert.equal(controller.getState().isExpired, true);
+			} finally {
+				controller.dispose();
+			}
+		}
+	});
+
 	it("initializes without active widget on a brand new session", () => {
 		const controller = new CacheTimerController();
 		const mock = createMockUi();
@@ -515,7 +528,6 @@ describe("CacheTimerController lifecycle", () => {
 
 	it("supports audio notification toggle and slash commands", () => {
 		const controller = new CacheTimerController();
-		const mock = createMockUi();
 
 		assert.equal(controller.isAudioEnabled(), true);
 		assert.equal(controller.toggleSound(), false);

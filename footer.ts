@@ -6,9 +6,9 @@ import type {
 	Theme,
 } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { formatCacheElapsed, type CacheTimerController } from "./cache-timer.ts";
+import { colorizeRgb, formatCacheElapsed, getCacheColor, type CacheTimerController } from "./cache-timer.ts";
 import type { GitInfoController } from "./git-info.ts";
-import { fg, resolvePalette, sanitizeControlChars, stripAnsi } from "./palette.ts";
+import { fg, resolvePalette, resolveThemeAppearance, resolveThemeColorMode, sanitizeControlChars, stripAnsi, themeText } from "./palette.ts";
 
 export interface FooterState {
 	readonly model: string;
@@ -18,6 +18,7 @@ export interface FooterState {
 	readonly cacheHitRate: number | undefined;
 	readonly cacheTimer: string;
 	readonly cacheExpired: boolean;
+	readonly cacheRatio?: number;
 	/** Session-wide recorded estimate; null means at least one usage has no price. */
 	readonly cost?: number | null;
 	readonly statuses: ReadonlyMap<string, string>;
@@ -27,6 +28,7 @@ export interface FooterPaint {
 	accent(text: string): string;
 	muted(text: string): string;
 	warning(text: string): string;
+	ttl?(text: string, ratio: number): string;
 }
 
 function clean(text: string): string {
@@ -48,11 +50,14 @@ function formatCost(cost: number | null): string {
 }
 
 function footerPaint(theme?: Theme): FooterPaint {
-	const palette = resolvePalette(theme?.name);
+	const scheme = resolveThemeAppearance(theme);
+	const palette = resolvePalette(scheme);
+	const colorMode = resolveThemeColorMode(theme);
 	return {
-		accent: (text) => theme ? theme.fg("accent", text) : fg(palette.cc.claude, text),
-		muted: (text) => theme ? theme.fg("muted", text) : fg("#a0a0a0", text),
-		warning: (text) => theme ? theme.fg("warning", text) : fg("#d4ad75", text),
+		accent: (text) => themeText(theme, "accent", text, (value) => fg(palette.cc.claude, value, colorMode)),
+		muted: (text) => themeText(theme, "muted", text, (value) => fg(palette.cc.inactive, value, colorMode)),
+		warning: (text) => themeText(theme, "warning", text, (value) => fg(palette.cc.warning, value, colorMode)),
+		ttl: (text, ratio) => colorizeRgb(text, getCacheColor(ratio, scheme), colorMode),
 	};
 }
 
@@ -80,7 +85,9 @@ export function buildFooterLines(
 		parts.push({ role: "cache", text: paint.muted(`cache ${Math.round(state.cacheHitRate)}%`) });
 	}
 	if (state.cacheTimer) {
-		parts.push({ role: "ttl", text: (state.cacheExpired ? paint.warning : paint.muted)(clean(state.cacheTimer)) });
+		const text = clean(state.cacheTimer);
+		const ratio = state.cacheRatio ?? (state.cacheExpired ? 1 : 0);
+		parts.push({ role: "ttl", text: paint.ttl ? paint.ttl(text, ratio) : (state.cacheExpired ? paint.warning : paint.muted)(text) });
 	}
 	const fitPrimary = (budget: number): string => {
 		if (budget < 1) return "";
@@ -176,8 +183,9 @@ export function registerFooter(pi: ExtensionAPI, options: FooterOptions = {}): v
 						git: branch ? `${branch}${changed > 0 ? ` +${changed}` : ""}` : "",
 						context,
 						cacheHitRate,
-						cacheTimer: hasCache && options.cache ? `ttl ${formatCacheElapsed(cache.elapsedMs)} / ${formatCacheElapsed(options.cache.getTtlMs()).replace(" 0sn", "")}` : "",
+						cacheTimer: hasCache && options.cache ? `ttl ${formatCacheElapsed(cache.isProcessing ? 0 : cache.elapsedMs)} / ${formatCacheElapsed(options.cache.getTtlMs()).replace(" 0sn", "")}` : "",
 						cacheExpired: cache?.isExpired ?? false,
+						cacheRatio: cache?.isProcessing ? 0 : cache?.ratio,
 						cost,
 						statuses: footerData.getExtensionStatuses(),
 					}, width, footerPaint(ctx.ui.theme ?? theme));

@@ -15,6 +15,7 @@ import * as PiTui from "@earendil-works/pi-tui";
 import type { Text } from "@earendil-works/pi-tui";
 import { notifySafely } from "./pi-compat.ts";
 import { ToolDiffComponent, parseDiffText } from "./tool-diff.ts";
+import { sanitizeControlChars, sanitizeSafeAnsi, stripAnsi } from "./palette.ts";
 
 const {
 	createBashToolDefinition,
@@ -57,7 +58,7 @@ type TextResult = {
 
 function singleLine(text: string, maxLength = MAX_SUMMARY_CHARS): string {
 	if (typeof text !== "string") return "";
-	const compact = text.replace(/\s+/g, " ").trim();
+	const compact = sanitizeControlChars(stripAnsi(text).replace(/\s+/g, " ")).trim();
 	return compact.length > maxLength
 		? `${compact.slice(0, maxLength - 1)}…`
 		: compact;
@@ -155,7 +156,7 @@ function renderCall(
 	theme: Theme,
 	context: RenderContext,
 ): Text {
-	const safeLabel = typeof label === "string" && label ? label : "Tool";
+	const safeLabel = singleLine(label) || "Tool";
 	let dotColor: "accent" | "error" | "success" = "accent";
 	if (context.isError) dotColor = "error";
 	else if (context.executionStarted && !context.isPartial) dotColor = "success";
@@ -189,14 +190,14 @@ function renderResult(
 	let text = theme.fg(color, `  └ ${status}${options.isPartial ? "" : durationSuffix(context)}`);
 	if (output && !options.expanded) text += expansionHint(theme);
 	for (const warning of outputWarnings(result.details)) {
-		text += `\n${theme.fg("warning", `    ${warning}`)}`;
+		text += `\n${theme.fg("warning", `    ${singleLine(warning, Infinity)}`)}`;
 	}
 
 	if (output && options.expanded) {
 		// The expanded fallback is the final disclosure level: do not hide
 		// available evidence behind a second, unreachable preview limit.
 		for (const line of output.split("\n")) {
-			text += `\n${theme.fg("toolOutput", `    ${line}`)}`;
+			text += `\n${theme.fg("toolOutput", `    ${sanitizeSafeAnsi(line)}`)}`;
 		}
 	}
 	return new PiTui.Text(text, outputPadding(context), 0);
@@ -378,7 +379,10 @@ function compactToolRenderers(toolName: string, base?: ToolRenderers): ToolRende
 				container.addChild(padOriginal(original, base, context));
 			} else {
 				const detail = builtinDetail(toolName, args);
-				if (detail) container.addChild(new PiTui.Text(theme.fg("toolOutput", detail), outputPadding(context), 0));
+				if (detail) {
+					const safeDetail = detail.split("\n").map(sanitizeSafeAnsi).join("\n");
+					container.addChild(new PiTui.Text(theme.fg("toolOutput", safeDetail), outputPadding(context), 0));
+				}
 			}
 			return container;
 		},

@@ -11,28 +11,20 @@ import {
 	rgbTo256,
 	fgAnsi,
 	fg,
-	resolvePalette,
 } from "../palette.ts";
 import {
 	formatTokenCount,
 	formatElapsed,
-	thinkingWording,
-	thinkingGlowPaint,
-	glimmerMessage,
 	buildSpinnerLine,
 	effortSuffixFor,
 	SpinnerController,
-	registerSpinner,
 	type SpinnerFrameState,
 	type SpinnerPaint,
 } from "../spinner.ts";
 import type {
-	ExtensionAPI,
 	ExtensionContext,
 	MessageEndEvent,
 	MessageUpdateEvent,
-	SessionStartEvent,
-	Theme,
 } from "@earendil-works/pi-coding-agent";
 
 const mockPaint: SpinnerPaint = {

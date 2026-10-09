@@ -21,20 +21,20 @@ const state: FooterState = {
 const paint = { accent: (s: string) => s, muted: (s: string) => s, warning: (s: string) => s };
 
 function mountFooter(entries: unknown[], branch = "main", git?: GitInfoController,
-	theme: Pick<Theme, "fg"> = { fg: (_color, text) => text }) {
+	theme: Pick<Theme, "fg"> & Partial<Pick<Theme, "appearance" | "getColorMode">> = { fg: (_color, text) => text }, cache?: CacheTimerController) {
 	let component: { render(width: number): string[]; dispose(): void } | undefined;
 	let start: Function | undefined;
 	const ctx = {
 		hasUI: true, cwd: "/tmp/project", model: { id: "test", name: "Test model" },
 		getContextUsage: () => state.context,
 		sessionManager: { getSessionId: () => "session", getLeafId: () => "leaf", getEntries: () => entries, getBranch: () => entries },
-		ui: { setFooter: (factory: Function) => {
+		ui: { setWidget: () => {}, setFooter: (factory: Function) => {
 			component = factory({ requestRender: () => {} }, theme, {
 				getGitBranch: () => branch, getExtensionStatuses: () => new Map(), onBranchChange: () => () => {},
 			});
 		} },
 	} as unknown as ExtensionContext;
-	registerFooter({ on: (_name: string, handler: Function) => { start = handler; } } as unknown as ExtensionAPI, { git });
+	registerFooter({ on: (_name: string, handler: Function) => { start = handler; } } as unknown as ExtensionAPI, { git, cache });
 	start!({}, ctx);
 	assert.ok(component);
 	return component;
@@ -45,6 +45,87 @@ describe("minimal footer", () => {
 		assert.deepEqual(buildFooterLines(state, 160, paint), [
 			"Grok 4.7 (low) | pi-ter-ws | main +5 | 75.5k / 500k | cache 78% | ttl 1dk 47sn / 5dk",
 		]);
+	});
+
+	it("smoothly colors the live TTL from yellow at three minutes to fixed red after five", (t) => {
+		const now = 1_000_000;
+		t.mock.method(Date, "now", () => now);
+		const cache = new CacheTimerController({ soundEnabled: false });
+		const component = mountFooter([], "main", undefined, {
+			fg: (_role, text) => text, appearance: "dark", getColorMode: () => "truecolor",
+		}, cache);
+		const colorAt = (elapsedMs: number): number[] => {
+			cache.setLastContextTimestamp(now - elapsedMs);
+			const row = component.render(160)[0];
+			const match = row.match(/\x1b\[38;2;(\d+);(\d+);(\d+)mttl /);
+			assert.ok(match, `TTL must have an RGB color at ${elapsedMs}ms`);
+			return match.slice(1).map(Number);
+		};
+		try {
+			assert.deepEqual(colorAt(180_000), [255, 193, 7]);
+			assert.deepEqual(colorAt(240_000), [240, 105, 35]);
+			let previous = colorAt(180_000);
+			for (let elapsedMs = 181_000; elapsedMs <= 300_000; elapsedMs += 1000) {
+				const current = colorAt(elapsedMs);
+				assert.ok(current[1] <= previous[1], "green decreases toward red");
+				assert.ok(current.every((channel, i) => Math.abs(channel - previous[i]) <= 4), "no abrupt color jumps");
+				previous = current;
+			}
+			assert.deepEqual(colorAt(300_000), [140, 18, 18]);
+			assert.deepEqual(colorAt(360_000), colorAt(300_000));
+		} finally {
+			component.dispose();
+			cache.dispose();
+		}
+	});
+
+	it("honors light backgrounds and the host's 256-color encoding for TTL", (t) => {
+		t.mock.method(Date, "now", () => 1_000_000);
+		const cache = new CacheTimerController({ soundEnabled: false });
+		let mode: "truecolor" | "256color" = "truecolor";
+		const component = mountFooter([], "main", undefined, {
+			fg: (_role, text) => text, appearance: "light", getColorMode: () => mode,
+		}, cache);
+		try {
+			cache.setLastContextTimestamp(820_000);
+			assert.ok(component.render(160)[0].includes("\x1b[38;2;205;130;0mttl "));
+			cache.setLastContextTimestamp(700_000);
+			assert.ok(component.render(160)[0].includes("\x1b[38;2;105;15;15mttl "));
+			mode = "256color";
+			assert.match(component.render(160)[0], /\x1b\[38;5;\d+mttl /);
+		} finally {
+			component.dispose();
+			cache.dispose();
+		}
+	});
+
+	it("shows a fresh TTL during processing rather than the previous expired request", (t) => {
+		t.mock.method(Date, "now", () => 1_000_000);
+		const cache = new CacheTimerController({ soundEnabled: false });
+		cache.setLastContextTimestamp(640_000);
+		const component = mountFooter([], "main", undefined, {
+			fg: (_role, text) => text, appearance: "dark", getColorMode: () => "truecolor",
+		}, cache);
+		try {
+			cache.handleAgentStart({ hasUI: false } as Parameters<CacheTimerController["handleAgentStart"]>[0]);
+			const row = component.render(160)[0];
+			assert.ok(row.includes("\x1b[38;2;78;186;101mttl 0sn / 5dk"));
+		} finally {
+			component.dispose();
+			cache.dispose();
+		}
+	});
+
+	it("falls back safely when the host theme painter throws or returns invalid text", () => {
+		for (const fg of [() => { throw new Error("theme unavailable"); }, () => undefined]) {
+			const component = mountFooter([], "main", undefined, { fg } as unknown as Pick<Theme, "fg">);
+			try {
+				assert.doesNotThrow(() => component.render(160));
+				assert.ok(stripAnsi(component.render(160)[0]).includes("Test model"));
+			} finally {
+				component.dispose();
+			}
+		}
 	});
 
 	it("right-aligns the session price, reserving space even on narrow terminals", () => {

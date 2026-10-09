@@ -1,6 +1,6 @@
 /** Theme-aware rendering helpers and standalone fallback palettes. */
 import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
-import { getTerminalColorMode } from "@earendil-works/pi-tui";
+import { getTerminalColorMode, visibleWidth as tuiVisibleWidth } from "@earendil-works/pi-tui";
 
 export interface Rgb {
 	readonly r: number;
@@ -291,193 +291,41 @@ export function sanitizeSafeAnsi(text: string): string {
 	return text.replace(NON_SGR_ANSI_OR_UNSAFE_CONTROLS, "");
 }
 
-/**
- * Calculate the visible width of a string in terminal columns.
- * Fast-paths printable ASCII strings without ANSI. Properly ignores ANSI escape
- * sequences, normalizes Unicode, accounts for zero-width combining marks, and
- * measures fullwidth / East Asian characters as 2 columns.
- */
-export function visibleWidth(str: string): number {
-	if (!str || typeof str !== "string") return 0;
+const MAX_WIDTH_CACHE_SIZE = 512;
+const WIDTH_CACHE = new Map<string, number>();
 
+/** Fast path for Latin text and combining accents; other scripts use Pi's grapheme widths. */
+function simpleWidth(text: string): number | undefined {
 	let width = 0;
-	const len = str.length;
-
-	for (let i = 0; i < len; i++) {
-		const code = str.charCodeAt(i);
-
-		// 1. Fast path for printable ASCII (0x20..0x7e)
-		if (code >= 0x20 && code <= 0x7e) {
-			width += 1;
+	for (let i = 0; i < text.length; i++) {
+		const code = text.charCodeAt(i);
+		if ((code >= 0x20 && code <= 0x7e) || (code >= 0xa0 && code < 0x0300)) {
+			if (code !== 0x00ad) width++;
+		} else if ((code < 0x20 && code !== 0x1b) || code === 0x7f || (code >= 0x0300 && code <= 0x036f)) {
 			continue;
-		}
-
-		// 2. Fast path for Latin-1 / European / Turkish extended (0xa0..0x2ff)
-		if (code >= 0xa0 && code < 0x0300) {
-			if (code !== 0x00ad) {
-				width += 1;
-			}
-			continue;
-		}
-
-		// 3. Fast path for common Unicode symbols, punctuation, arrows (0x2000..0x2e7f)
-		if (code >= 0x2000 && code < 0x2e80) {
-			if (
-				(code >= 0x200b && code <= 0x200f) ||
-				(code >= 0x20d0 && code <= 0x20ff)
-			) {
-				continue;
-			}
-			if (code === 0x2329 || code === 0x232a) {
-				width += 2;
-			} else {
-				width += 1;
-			}
-			continue;
-		}
-
-		// 4. ESC (7-bit) control sequence
-		if (code === 0x1b) {
-			if (i + 1 < len) {
-				const next = str.charCodeAt(i + 1);
-				if (next === 0x5b) {
-					// CSI: \x1b[ ... [@-~]
-					i += 2;
-					while (i < len) {
-						const c = str.charCodeAt(i);
-						if (c >= 0x40 && c <= 0x7e) break;
-						i++;
-					}
-					continue;
-				}
-				if (next === 0x5d) {
-					// OSC: \x1b] ... (\x07 | \x1b\ | \x9c)
-					i += 2;
-					while (i < len) {
-						const c = str.charCodeAt(i);
-						if (c === 0x07 || c === 0x9c) break;
-						if (c === 0x1b && i + 1 < len && str.charCodeAt(i + 1) === 0x5c) {
-							i++;
-							break;
-						}
-						i++;
-					}
-					continue;
-				}
-				if (next === 0x50 || next === 0x58 || next === 0x5e || next === 0x5f) {
-					// DCS / APC / PM / SOS
-					i += 2;
-					while (i < len) {
-						const c = str.charCodeAt(i);
-						if (c === 0x07 || c === 0x9c) break;
-						if (c === 0x1b && i + 1 < len && str.charCodeAt(i + 1) === 0x5c) {
-							i++;
-							break;
-						}
-						i++;
-					}
-					continue;
-				}
-				if (
-					(next >= 0x28 && next <= 0x2f) || // ()*+,-./
-					next === 0x23 || // #
-					next === 0x25 // %
-				) {
-					i += 2;
-					continue;
-				}
-				if (
-					(next >= 0x41 && next <= 0x5a) || // A-Z
-					(next >= 0x61 && next <= 0x7a) || // a-z
-					(next >= 0x30 && next <= 0x39) || // 0-9
-					next === 0x3d ||
-					next === 0x40 ||
-					next === 0x3c ||
-					next === 0x3e
-				) {
-					i += 1;
-					continue;
-				}
-			}
-			continue;
-		}
-
-		// 8-bit CSI (\x9b)
-		if (code === 0x9b) {
-			i += 1;
-			while (i < len) {
-				const c = str.charCodeAt(i);
-				if (c >= 0x40 && c <= 0x7e) break;
-				i++;
-			}
-			continue;
-		}
-
-		// 8-bit OSC (\x9d) / DCS (\x90) / APC (\x9f) / PM (\x9e) / SOS (\x98)
-		if (
-			code === 0x9d ||
-			code === 0x90 ||
-			code === 0x98 ||
-			code === 0x9e ||
-			code === 0x9f
-		) {
-			i += 1;
-			while (i < len) {
-				const c = str.charCodeAt(i);
-				if (c === 0x07 || c === 0x9c) break;
-				if (c === 0x1b && i + 1 < len && str.charCodeAt(i + 1) === 0x5c) {
-					i++;
-					break;
-				}
-				i++;
-			}
-			continue;
-		}
-
-		// Astral code point / surrogate pair
-		if (code >= 0xd800 && code <= 0xdbff) {
-			const cp = str.codePointAt(i);
-			if (cp !== undefined && cp > 0xffff) {
-				i++; // Skip low surrogate
-				if (cp >= 0x1f000 && cp <= 0x1faff) {
-					width += 2;
-				} else {
-					width += 1;
-				}
-				continue;
-			}
-		}
-
-		// Zero width: Control characters, combining diacritical marks, zero-width spaces, soft hyphen, variation selectors
-		if (
-			code <= 0x001f ||
-			(code >= 0x007f && code <= 0x009f) ||
-			(code >= 0x0300 && code <= 0x036f) ||
-			(code >= 0x1ab0 && code <= 0x1aff) ||
-			(code >= 0x1dc0 && code <= 0x1dff) ||
-			(code >= 0xfe00 && code <= 0xfe0f) ||
-			(code >= 0xfe20 && code <= 0xfe2f) ||
-			code === 0x00ad
-		) {
-			continue;
-		}
-
-		// Fullwidth / East Asian Wide: CJK ideographs, fullwidth forms, wide emojis
-		if (
-			(code >= 0x1100 && code <= 0x115f) ||
-			(code >= 0x2e80 && code <= 0xa4cf && code !== 0x303f) ||
-			(code >= 0xac00 && code <= 0xd7a3) ||
-			(code >= 0xf900 && code <= 0xfaff) ||
-			(code >= 0xfe10 && code <= 0xfe19) ||
-			(code >= 0xfe30 && code <= 0xfe6f) ||
-			(code >= 0xff01 && code <= 0xff60) ||
-			(code >= 0xffe0 && code <= 0xffe6)
-		) {
-			width += 2;
 		} else {
-			width += 1;
+			return undefined;
 		}
 	}
+	return width;
+}
+
+/** Measures terminal columns without replaying controls or splitting grapheme clusters. */
+export function visibleWidth(str: string): number {
+	if (!str || typeof str !== "string") return 0;
+	const cached = WIDTH_CACHE.get(str);
+	if (cached !== undefined) return cached;
+	const simple = simpleWidth(str);
+	if (simple !== undefined) return simple;
+
+	// Pi handles graphemes; our sanitizer additionally removes C1/DCS payloads.
+	const clean = sanitizeControlChars(stripAnsi(str));
+	const width = simpleWidth(clean) ?? tuiVisibleWidth(clean);
+	if (WIDTH_CACHE.size >= MAX_WIDTH_CACHE_SIZE) {
+		const oldest = WIDTH_CACHE.keys().next().value;
+		if (oldest !== undefined) WIDTH_CACHE.delete(oldest);
+	}
+	WIDTH_CACHE.set(str, width);
 	return width;
 }
 

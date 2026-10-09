@@ -475,6 +475,21 @@ describe("spinner", () => {
 		});
 	});
 
+	describe("timer cleanup", () => {
+		it("stops pending thinking timers along with the repaint loop", () => {
+			const controller = new SpinnerController();
+			try {
+				controller.beginThinking();
+				controller.settleThinking();
+				assert.equal(controller.hasActiveTimers(), true);
+				controller.stopLoop();
+				assert.equal(controller.hasActiveTimers(), false);
+			} finally {
+				controller.dispose();
+			}
+		});
+	});
+
 	describe("streaming rate", () => {
 		it("prefers reported output increments over character estimates", (t) => {
 			let now = 1000;
