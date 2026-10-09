@@ -1,6 +1,6 @@
 /**
  * Compact tool views through Pi's public renderer resolver.
- * Expanded views retain the original renderer; execution is never replaced.
+ * Expanded views retain tool identity above the original renderer; execution is never replaced.
  * The older re-registration/prototype implementation remains a compatibility
  * path only for hosts without registerToolRenderer.
  */
@@ -14,7 +14,7 @@ import type {
 import * as PiTui from "@earendil-works/pi-tui";
 import type { Text } from "@earendil-works/pi-tui";
 import { notifySafely } from "./pi-compat.ts";
-import { ToolDiffComponent } from "./tool-diff.ts";
+import { ToolDiffComponent, parseDiffText } from "./tool-diff.ts";
 
 const {
 	createBashToolDefinition,
@@ -28,7 +28,7 @@ const {
 } = PiCodingAgent;
 
 const MAX_SUMMARY_CHARS = 120;
-const MAX_EXPANDED_LINES = 30;
+const MAX_DIFF_PREVIEW_LINES = 12;
 let piCompatibilityWarningLogged = false;
 
 function warnPiCompatibility(feature: string): void {
@@ -41,6 +41,7 @@ type RenderContext = {
 	executionStarted: boolean;
 	isError: boolean;
 	isPartial: boolean;
+	durationMs?: number;
 	outputPad?: number;
 };
 
@@ -83,9 +84,42 @@ function nonEmptyLineCount(text: string): number {
 	return text.split("\n").filter((line) => line.trim()).length;
 }
 
-function truncationSuffix(details: unknown): string {
-	const value = details as { truncation?: { truncated?: boolean } } | undefined;
-	return value?.truncation?.truncated ? " · truncated" : "";
+function recordValue(value: unknown): Record<string, unknown> {
+	return value && typeof value === "object" ? value as Record<string, unknown> : {};
+}
+
+function positiveInteger(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function outputWarnings(details: unknown): string[] {
+	const value = recordValue(details);
+	const warnings: string[] = [];
+	if (recordValue(value.truncation).truncated === true) warnings.push("Output truncated · incomplete");
+	for (const [key, label] of [
+		["matchLimitReached", "Match"],
+		["resultLimitReached", "Result"],
+		["entryLimitReached", "Entry"],
+	] as const) {
+		if (positiveInteger(value[key])) warnings.push(`${label} limit reached (${value[key]}) · incomplete`);
+	}
+	if (value.linesTruncated === true) warnings.push("Lines truncated · incomplete");
+	if (typeof value.fullOutputPath === "string" && value.fullOutputPath.trim()) {
+		warnings.push(`Full output: ${value.fullOutputPath}`);
+	}
+	return warnings;
+}
+
+function durationSuffix(context: RenderContext): string {
+	const ms = context.durationMs;
+	return typeof ms === "number" && Number.isFinite(ms) && ms >= 0
+		? ` · ${(ms / 1000).toFixed(1)}s` : "";
+}
+
+function expansionHint(theme: Theme): string {
+	const hint = typeof PiCodingAgent.keyHint === "function"
+		? PiCodingAgent.keyHint("app.tools.expand", "to expand") : "to expand";
+	return theme.fg("dim", ` ${hint}`);
 }
 
 function lineSummary(noun: string, output: string): string {
@@ -125,9 +159,12 @@ function renderCall(
 	let dotColor: "accent" | "error" | "success" = "accent";
 	if (context.isError) dotColor = "error";
 	else if (context.executionStarted && !context.isPartial) dotColor = "success";
-	const suffix = detail ? theme.fg("muted", `(${singleLine(detail)})`) : "";
+	const suffix = detail ? theme.fg("muted", `  ${singleLine(detail)}`) : "";
+	const state = context.isError ? "Failed"
+		: !context.executionStarted ? "Preparing…"
+		: context.isPartial ? "Working…" : "Completed";
 	return new PiTui.Text(
-		`${theme.fg(dotColor, "●")} ${theme.fg("toolTitle", theme.bold(safeLabel))}${suffix}`,
+		`${theme.fg(dotColor, "●")} ${theme.fg("toolTitle", theme.bold(safeLabel))}${suffix}${theme.fg(dotColor, ` · ${state}`)}`,
 		outputPadding(context),
 		0,
 	);
@@ -141,29 +178,25 @@ function renderResult(
 	summary: (output: string) => string,
 ): Text {
 	const output = resultText(result);
-	if (options.isPartial) {
-		const progress = singleLine(output) || "Working…";
-		return new PiTui.Text(theme.fg("dim", `  └ ${progress}`), outputPadding(context), 0);
+	const isError = context.isError;
+	const color = isError ? "error" : "dim";
+	const completedSummary = !options.isPartial && !isError ? summary(output) : "";
+	const completedStatus = completedSummary === "Done" ? "Completed"
+		: completedSummary.startsWith("Completed ") ? completedSummary : `Completed · ${completedSummary}`;
+	const status = options.isPartial ? `Working…${output ? ` · ${singleLine(output)}` : ""}`
+		: isError ? `Failed${output ? ` · ${singleLine(output)}` : ""}`
+		: completedStatus;
+	let text = theme.fg(color, `  └ ${status}${options.isPartial ? "" : durationSuffix(context)}`);
+	if (output && !options.expanded) text += expansionHint(theme);
+	for (const warning of outputWarnings(result.details)) {
+		text += `\n${theme.fg("warning", `    ${warning}`)}`;
 	}
 
-	const isError = context.isError;
-	const status = isError ? singleLine(output) || "Failed" : summary(output);
-	const color = isError ? "error" : "dim";
-	let text = theme.fg(color, `  └ ${status}${truncationSuffix(result.details)}`);
-
-	if (output && !options.expanded) {
-		const hint =
-			typeof PiCodingAgent.keyHint === "function"
-				? PiCodingAgent.keyHint("app.tools.expand", "to expand")
-				: "to expand";
-		text += theme.fg("dim", ` ${hint}`);
-	} else if (output && options.expanded) {
-		const lines = output.split("\n");
-		for (const line of lines.slice(0, MAX_EXPANDED_LINES)) {
+	if (output && options.expanded) {
+		// The expanded fallback is the final disclosure level: do not hide
+		// available evidence behind a second, unreachable preview limit.
+		for (const line of output.split("\n")) {
 			text += `\n${theme.fg("toolOutput", `    ${line}`)}`;
-		}
-		if (lines.length > MAX_EXPANDED_LINES) {
-			text += `\n${theme.fg("dim", `    … ${lines.length - MAX_EXPANDED_LINES} more lines`)}`;
 		}
 	}
 	return new PiTui.Text(text, outputPadding(context), 0);
@@ -205,7 +238,7 @@ const BUILTIN_FACTORIES: Readonly<
 	ls: (cwd) => createLsToolDefinition(cwd),
 };
 
-// Master switch for the Claude compact rendering (toggled via /cc-tools).
+// Master switch for compact tool rendering (toggled via /arda-tools).
 let claudeToolsEnabled = true;
 let lastCwd: string | null = null;
 
@@ -281,6 +314,23 @@ export function genericSummary(output: string): string {
 	return lineSummary("Completed", output);
 }
 
+function builtinDetail(toolName: string, args: unknown): string {
+	const value = recordValue(args);
+	const path = typeof value.path === "string" ? value.path : "";
+	const parts: string[] = [];
+	if (toolName === "read" || toolName === "write" || toolName === "edit" || toolName === "ls") {
+		parts.push(path || (toolName === "ls" ? "." : ""));
+		if (toolName === "read" && positiveInteger(value.offset)) parts.push(`offset: ${value.offset}`);
+	} else if (toolName === "grep" || toolName === "find") {
+		parts.push(typeof value.pattern === "string" ? JSON.stringify(value.pattern) : "", path || ".");
+		if (toolName === "grep" && typeof value.glob === "string" && value.glob) parts.push(`glob: ${value.glob}`);
+	} else {
+		return genericDetail(args);
+	}
+	if (["read", "grep", "find", "ls"].includes(toolName) && positiveInteger(value.limit)) parts.push(`limit: ${value.limit}`);
+	return parts.filter(Boolean).join(" · ");
+}
+
 function genericRenderCall(
 	args: unknown,
 	theme: Theme,
@@ -288,7 +338,7 @@ function genericRenderCall(
 	toolName: string,
 ): Text {
 	const label = prettyToolLabel(toolName);
-	const detail = genericDetail(args);
+	const detail = builtinDetail(toolName, args);
 	return renderCall(label, detail, theme, context);
 }
 
@@ -301,27 +351,67 @@ function genericRenderResult(
 	return renderResult(result, options, theme, context, genericSummary);
 }
 
+function padOriginal(component: PiTui.Component, base: ToolRenderers, context: RenderContext): PiTui.Component {
+	if (base.renderShell === "self") return component;
+	const box = new PiTui.Box(outputPadding(context), 0);
+	box.addChild(component);
+	return box;
+}
+
 function compactToolRenderers(toolName: string, base?: ToolRenderers): ToolRenderers {
+	// Pi passes our last outer component back on every redraw. Native renderers
+	// must instead receive their own previous component, isolated per execution
+	// and render slot. Weak keys allow finished tool rows to be collected.
+	const callComponents = new WeakMap<object, PiTui.Component>();
+	const resultComponents = new WeakMap<object, PiTui.Component>();
 	return {
 		renderShell: "self",
 		renderCall(args, theme, context) {
-			if (context.expanded && base?.renderCall) {
-				return base.renderCall(args, theme, context);
+			if (!context.expanded) return genericRenderCall(args, theme, context, toolName);
+			const container = new PiTui.Container();
+			container.addChild(renderCall(prettyToolLabel(toolName), "", theme, context));
+			// Native edit call renderers can embed their own diff preview.
+			// Keep edit identity/path here and render its diff only in our result.
+			if (base?.renderCall && toolName !== "edit") {
+				const original = base.renderCall(args, theme, { ...context, lastComponent: callComponents.get(context.state) });
+				if (context.state && typeof context.state === "object") callComponents.set(context.state, original);
+				container.addChild(padOriginal(original, base, context));
+			} else {
+				const detail = builtinDetail(toolName, args);
+				if (detail) container.addChild(new PiTui.Text(theme.fg("toolOutput", detail), outputPadding(context), 0));
 			}
-			return genericRenderCall(args, theme, context, toolName);
+			return container;
 		},
 		renderResult(result, options, theme, context) {
+			const showOriginal = (toolName !== "edit" || context.isError) &&
+				(options.expanded || (!context.isError && result.content.some((item) => item.type === "image")));
+			if (base?.renderResult && (showOriginal || resultComponents.has(context.state))) {
+				// Keep a visited native renderer up to date while collapsed, so its
+				// final-result cleanup still runs (e.g. shell elapsed-time intervals).
+				const original = base.renderResult(result, options, theme, { ...context, lastComponent: resultComponents.get(context.state) });
+				if (context.state && typeof context.state === "object") resultComponents.set(context.state, original);
+				if (showOriginal) return padOriginal(original, base, context);
+			}
 			if (context.isError) {
 				return genericRenderResult(result, options, theme, context);
 			}
-			if (base?.renderResult && (options.expanded || result.content.some((item) => item.type === "image"))) {
-				return base.renderResult(result, options, theme, context);
-			}
 			if (toolName === "edit" && !options.isPartial) {
-				const diff = (result.details as { diff?: unknown } | undefined)?.diff;
+				const diff = recordValue(result.details).diff;
 				if (typeof diff === "string" && diff.trim()) {
-					const args = context.args as { path?: string; file_path?: string } | undefined;
-					return new ToolDiffComponent(diff, args?.path ?? args?.file_path ?? "", theme, outputPadding(context));
+					const { lines } = parseDiffText(diff);
+					const added = lines.filter((line) => line.type === "added").length;
+					const removed = lines.filter((line) => line.type === "removed").length;
+					const summary = renderResult({ content: [], details: result.details }, options, theme, context,
+						() => `Updated · +${added} / −${removed} lines`);
+					const container = new PiTui.Container();
+					container.addChild(summary);
+					if (options.expanded || lines.length <= MAX_DIFF_PREVIEW_LINES) {
+						const args = context.args as { path?: string; file_path?: string } | undefined;
+						container.addChild(new ToolDiffComponent(diff, args?.path ?? args?.file_path ?? "", theme, outputPadding(context)));
+					} else {
+						container.addChild(new PiTui.Text(theme.fg("dim", "    Changes hidden ·") + expansionHint(theme), outputPadding(context), 0));
+					}
+					return container;
 				}
 			}
 			if (result.content.some((item) => item.type === "image") && !options.expanded) {
@@ -344,7 +434,7 @@ function compactToolRenderers(toolName: string, base?: ToolRenderers): ToolRende
 
 /**
  * Register compact render-only overrides for Pi-owned local built-in tools.
- * Wrapped names are remembered for re-enable/restore cycles (/cc-tools).
+ * Wrapped names are remembered for re-enable/restore cycles (/arda-tools).
  * Returns the list of wrapped tool names (useful for tests).
  */
 export function registerClaudeToolRenderers(
@@ -1017,7 +1107,6 @@ export function registerToolRenderers(pi: ExtensionAPI): void {
 		},
 	};
 	pi.registerCommand("arda-tools", command);
-	pi.registerCommand("cc-tools", command);
 
 	pi.on("session_start", async (_event, ctx) => {
 		try {

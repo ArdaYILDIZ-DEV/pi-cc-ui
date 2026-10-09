@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it, afterEach } from "node:test";
 import type { ExtensionAPI, Theme, ToolRendererResolver, ToolRenderers } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { Box, Container, Text, visibleWidth } from "@earendil-works/pi-tui";
 import {
 	addAssistantResponseMarker,
 	genericDetail,
@@ -16,9 +16,11 @@ import {
 	setClaudeToolsEnabled,
 	uninstallGlobalClaudeToolPatch,
 } from "../tool-renderers.ts";
+import { ToolDiffComponent } from "../tool-diff.ts";
 import {
 	ToolExecutionComponent,
 	initTheme,
+	createBashToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 
 try {
@@ -289,6 +291,253 @@ describe("registerClaudeToolRenderers (builtin official path)", () => {
 	});
 });
 
+describe("compact tool presentation", () => {
+	function renderer(name: string, base?: ToolRenderers) {
+		const { pi } = createMockPi();
+		let resolver: ToolRendererResolver | undefined;
+		pi.registerToolRenderer = (value) => { resolver = value; };
+		registerToolRenderers(pi);
+		return resolver!(name, () => base)!;
+	}
+
+	const theme = createMockTheme();
+	const context = { executionStarted: true, isPartial: false, isError: false, outputPad: 1 };
+	const result = { content: [{ type: "text" as const, text: "first\nlast" }], details: {} };
+	const options = { expanded: false, isPartial: false };
+
+	it("includes builtin scope and requested read bounds without inferring returned ranges", () => {
+		const grep = renderer("grep").renderCall!({ pattern: "TODO", path: "src/", glob: "*.ts", limit: 20 }, theme, context as never).render(120).join("\n");
+		assert.ok(grep.includes('"TODO" · src/ · glob: *.ts · limit: 20'));
+		const read = renderer("read").renderCall!({ path: "a.ts", offset: 120, limit: 60 }, theme, context as never).render(120).join("\n");
+		assert.ok(read.includes("a.ts · offset: 120 · limit: 60"));
+		assert.ok(!read.includes("120–179"));
+		assert.ok(renderer("ls").renderCall!({}, theme, context as never).render(80).join("\n").includes("List  ."));
+		assert.ok(renderer("unknown").renderCall!({ query: "hello" }, theme, context as never).render(80).join("\n").includes("hello"));
+	});
+
+	it("labels pending states and completion with optional duration", () => {
+		const tool = renderer("bash");
+		assert.ok(tool.renderCall!({}, theme, { ...context, executionStarted: false, isPartial: true } as never).render(80).join("\n").includes("Preparing…"));
+		assert.ok(tool.renderCall!({}, theme, { ...context, isPartial: true } as never).render(80).join("\n").includes("Working…"));
+		const partial = tool.renderResult!(result, { ...options, isPartial: true }, theme, { ...context, isPartial: true, durationMs: 2100 } as never).render(80).join("\n");
+		assert.ok(partial.includes("Working…"));
+		assert.ok(!partial.includes("2.1s"));
+		const complete = tool.renderResult!(result, options, theme, { ...context, durationMs: 2100 } as never).render(80).join("\n");
+		assert.ok(complete.includes("Completed · Returned 2 lines · 2.1s"));
+		const failed = tool.renderResult!(result, options, theme, { ...context, isError: true } as never).render(80).join("\n");
+		assert.ok(failed.includes("Failed · first last"));
+		assert.ok(!failed.includes("NaN"));
+	});
+
+	it("shows each supported incompleteness warning and full output location", () => {
+		for (const details of [{ matchLimitReached: 20 }, { resultLimitReached: 20 }, { entryLimitReached: 20 }]) {
+			const text = renderer("grep").renderResult!({ ...result, details }, options, theme, context as never).render(120).join("\n");
+			assert.ok(text.includes("limit reached (20) · incomplete"));
+		}
+		const text = renderer("bash").renderResult!({ ...result, details: { truncation: { truncated: true }, linesTruncated: true, fullOutputPath: "/tmp/full.log" } }, options, theme, context as never).render(120).join("\n");
+		assert.ok(text.includes("Output truncated"));
+		assert.ok(text.includes("Lines truncated"));
+		assert.ok(text.includes("Full output: /tmp/full.log"));
+	});
+
+	it("preserves the original expanded error renderer", () => {
+		const original = new Text("rich error", 0, 0);
+		const tool = renderer("custom", { renderResult: () => original });
+		const expanded = tool.renderResult!(result, { ...options, expanded: true }, theme, { ...context, isError: true } as never);
+		assert.ok(expanded instanceof Box);
+		assert.equal(expanded.children[0], original);
+		assert.notEqual(tool.renderResult!(result, options, theme, { ...context, isError: true } as never), original);
+	});
+
+	it("keeps all available error lines accessible in the expanded fallback", () => {
+		const output = Array.from({ length: 45 }, (_, i) => `detail ${i + 1}`).join("\n");
+		const text = renderer("custom").renderResult!({ content: [{ type: "text", text: output }], details: {} }, { ...options, expanded: true }, theme, { ...context, isError: true } as never).render(80).join("\n");
+		assert.ok(text.includes("detail 45"));
+		assert.ok(!text.includes("more lines"));
+	});
+
+	it("summarizes large diffs and exposes every diff line when expanded", () => {
+		const diff = Array.from({ length: 20 }, (_, i) => `+${i + 1} unique_${i + 1}`).join("\n");
+		const tool = renderer("edit");
+		const value = { content: [], details: { diff } };
+		const collapsed = tool.renderResult!(value, options, theme, context as never).render(80).join("\n");
+		assert.ok(collapsed.includes("Updated · +20 / −0 lines"));
+		assert.ok(collapsed.includes("to expand"));
+		assert.ok(!collapsed.includes("unique_20"));
+		const expanded = tool.renderResult!(value, { ...options, expanded: true }, theme, context as never).render(80).join("\n");
+		assert.ok(expanded.includes("unique_20"));
+	});
+
+	it("uses our expanded edit diff even when native call and result renderers exist", () => {
+		let nativeCalls = 0;
+		const tool = renderer("edit", {
+			renderCall() { nativeCalls++; return new Text("NATIVE_DIFF_PREVIEW", 0, 0); },
+			renderResult() { nativeCalls++; return new Text("NATIVE_DIFF_RESULT", 0, 0); },
+		});
+		const ctx = { ...context, state: {}, expanded: true, args: { path: "src/example.ts" } };
+		const call = tool.renderCall!(ctx.args, theme, ctx as never);
+		assert.ok(call.render(80).join("\n").includes("Edit"));
+		assert.ok(call.render(80).join("\n").includes("src/example.ts"));
+		const diff = Array.from({ length: 20 }, (_, i) => `+${i + 1} unique_${i + 1}`).join("\n");
+		const expanded = tool.renderResult!({ content: [], details: { diff } }, { ...options, expanded: true }, theme, ctx as never);
+		assert.ok(expanded instanceof Container);
+		assert.ok(expanded.children.some((child) => child instanceof ToolDiffComponent));
+		assert.ok(expanded.render(80).join("\n").includes("unique_20"));
+		assert.ok(expanded.render(80).join("\n").includes("Updated · +20 / −0 lines"));
+		assert.equal(nativeCalls, 0);
+	});
+
+	it("still retains the original expanded edit error renderer without a native diff preview", () => {
+		let nativeCalls = 0;
+		const original = new Text("native error evidence", 0, 0);
+		const tool = renderer("edit", {
+			renderCall() { nativeCalls++; return new Text("native preview", 0, 0); },
+			renderResult: () => original,
+		});
+		const ctx = { ...context, state: {}, expanded: true, isError: true, args: { path: "missing.ts" } };
+		const call = tool.renderCall!(ctx.args, theme, ctx as never);
+		assert.ok(call.render(80).join("\n").includes("Failed"));
+		const expanded = tool.renderResult!(result, { ...options, expanded: true }, theme, ctx as never);
+		assert.ok(expanded instanceof Box);
+		assert.equal(expanded.children[0], original);
+		assert.equal(nativeCalls, 0);
+	});
+
+	it("fits calls, warning rows and diff disclosures into narrow terminal widths", () => {
+		const diff = Array.from({ length: 20 }, (_, i) => `+${i + 1} const value_${i} = true;`).join("\n");
+		const components = [
+			renderer("read").renderCall!({ path: "src/long-directory/tool-renderers.ts", offset: 120, limit: 60 }, theme, context as never),
+			renderer("grep").renderResult!({ ...result, details: { matchLimitReached: 20 } }, options, theme, context as never),
+			renderer("edit").renderResult!({ content: [], details: { diff } }, options, theme, context as never),
+			renderer("edit").renderResult!({ content: [], details: { diff: "-1 old\n+1 new" } }, options, theme, context as never),
+		];
+		for (const width of [20, 40, 80, 120]) {
+			for (const component of components) {
+				const lines = component.render(width);
+				assert.ok(lines.length > 0);
+				assert.ok(lines.every((line) => visibleWidth(line) <= width), `overflow at ${width} columns`);
+			}
+		}
+	});
+
+	it("does not duplicate completion wording for generic tools", () => {
+		const text = renderer("custom").renderResult!(result, options, theme, context as never).render(80).join("\n");
+		assert.ok(text.includes("Completed 2 lines"));
+		assert.ok(!text.includes("Completed · Completed"));
+	});
+
+	it("handles missing metadata and invalid durations without inventing status data", () => {
+		const tool = renderer("bash");
+		for (const durationMs of [undefined, NaN, Infinity, -1]) {
+			const text = tool.renderResult!({ content: [], details: null }, options, theme, { ...context, durationMs } as never).render(80).join("\n");
+			assert.ok(text.includes("Completed"));
+			assert.ok(!text.includes("NaN") && !text.includes("Infinity") && !text.includes("-0.0s"));
+			assert.ok(!text.includes("to expand") && !text.includes("incomplete"));
+		}
+		const malformed = tool.renderResult!({ ...result, details: { matchLimitReached: -1, truncation: null, fullOutputPath: 4 } }, options, theme, context as never).render(80).join("\n");
+		assert.ok(!malformed.includes("incomplete") && !malformed.includes("Full output:"));
+	});
+
+	it("preserves full builtin arguments when the original expanded call renderer exists", () => {
+		const original = new Text("full arguments", 0, 0);
+		const expanded = renderer("grep", { renderCall: () => original }).renderCall!({ pattern: "TODO", path: "src/" }, theme, { ...context, expanded: true } as never);
+		assert.ok(expanded instanceof Container);
+		assert.ok(expanded.render(80).join("\n").includes("Grep"));
+		assert.ok(expanded.children[1] instanceof Box);
+		assert.equal(expanded.children[1].children[0], original);
+		for (const name of ["bash", "powershell", "write", "edit", "find"]) {
+			const args = name === "bash" || name === "powershell" ? { command: "echo test" }
+				: name === "find" ? { pattern: "*.ts", path: "src/" } : { path: "src/a.ts" };
+			const text = renderer(name).renderCall!(args, theme, context as never).render(120).join("\n");
+			assert.ok(text.includes(name === "bash" || name === "powershell" ? "echo test" : "src/"));
+		}
+	});
+
+	it("keeps expanded shell identity and full multiline commands with or without a base renderer", () => {
+		const command = `echo ${"x".repeat(160)}\necho FINAL_COMMAND_LINE`;
+		for (const name of ["bash", "powershell"]) {
+			for (const base of [undefined, { renderCall: () => new Text(command, 0, 0) }]) {
+				const tool = renderer(name, base);
+				const expanded = tool.renderCall!({ command }, theme, { ...context, expanded: true } as never).render(240).join("\n");
+				assert.ok(expanded.includes(name === "bash" ? "Bash" : "PowerShell"));
+				assert.ok(expanded.includes("FINAL_COMMAND_LINE"));
+				assert.ok(expanded.includes("Completed"));
+			}
+		}
+	});
+
+	it("isolates original call/result caches from compact components and from other executions", () => {
+		const call = new Text("original call", 0, 0);
+		const resultComponent = new Container();
+		resultComponent.addChild(new Text("original output", 0, 0));
+		const callPrevious: unknown[] = [];
+		const resultPrevious: unknown[] = [];
+		const tool = renderer("bash", {
+			renderCall(_args, _theme, ctx) { callPrevious.push(ctx.lastComponent); return call; },
+			renderResult(_result, _options, _theme, ctx) { resultPrevious.push(ctx.lastComponent); return resultComponent; },
+		});
+		const state = {};
+		let lastCall;
+		let lastResult;
+		for (const expanded of [false, true, false, true]) {
+			lastCall = tool.renderCall!({ command: "echo test" }, theme, { ...context, state, expanded, lastComponent: lastCall } as never);
+			lastResult = tool.renderResult!(result, { ...options, expanded }, theme, { ...context, state, expanded, lastComponent: lastResult } as never);
+		}
+		tool.renderCall!({}, theme, { ...context, state: {}, expanded: true } as never);
+		tool.renderResult!(result, { ...options, expanded: true }, theme, { ...context, state: {}, expanded: true } as never);
+		assert.deepEqual(callPrevious, [undefined, call, undefined]);
+		assert.deepEqual(resultPrevious, [undefined, resultComponent, resultComponent, undefined]);
+	});
+
+	it("supports actual Pi shell renderers across expand/collapse with consistent padding", () => {
+		const tool = renderer("bash", createBashToolDefinition(process.cwd()) as ToolRenderers);
+		const state = {};
+		let lastCall;
+		let lastResult;
+		for (const expanded of [false, true, false, true]) {
+			const ctx = { ...context, state, expanded, outputPad: 4, durationMs: 2100, args: { command: "echo test" }, invalidate() {}, showImages: false };
+			lastCall = tool.renderCall!(ctx.args, theme, { ...ctx, lastComponent: lastCall } as never);
+			lastResult = tool.renderResult!(result, { ...options, expanded }, theme, { ...ctx, lastComponent: lastResult } as never);
+			const callRows = lastCall.render(80);
+			assert.ok(callRows[0].startsWith("    ●"));
+			assert.ok(callRows[0].includes("Bash"));
+			for (const row of lastResult.render(80).filter((line) => line.trim())) assert.ok(row.startsWith("    "));
+			if (expanded) assert.ok(lastResult.render(80).join("\n").includes("Took"));
+		}
+	});
+
+	it("finalizes a previously expanded native renderer even when the final result is collapsed", () => {
+		const phases: boolean[] = [];
+		const tool = renderer("custom", {
+			renderResult(_result, options) { phases.push(options.isPartial); return new Text("native result", 0, 0); },
+		});
+		const state = {};
+		tool.renderResult!(result, { expanded: true, isPartial: true }, theme, { ...context, state, isPartial: true } as never);
+		tool.renderResult!(result, options, theme, { ...context, state } as never);
+		assert.deepEqual(phases, [true, false]);
+	});
+
+	it("does not double-pad self-rendered originals", () => {
+		const call = new Text("self call", 4, 0);
+		const output = new Text("self output", 4, 0);
+		const tool = renderer("custom", { renderShell: "self", renderCall: () => call, renderResult: () => output });
+		const expanded = tool.renderCall!({}, theme, { ...context, expanded: true, outputPad: 4 } as never);
+		assert.ok(expanded instanceof Container);
+		assert.equal(expanded.children[1], call);
+		assert.equal(tool.renderResult!(result, { ...options, expanded: true }, theme, context as never), output);
+	});
+
+	it("keeps small diff previews and does not show success diffs for failed or partial results", () => {
+		const value = { content: [{ type: "text" as const, text: "failure evidence" }], details: { diff: "-1 old\n+1 new" } };
+		const tool = renderer("edit");
+		assert.ok(tool.renderResult!(value, options, theme, context as never).render(80).join("\n").includes("new"));
+		for (const state of [{ ...context, isError: true }, { ...context, isPartial: true }]) {
+			const text = tool.renderResult!(value, { ...options, isPartial: state.isPartial }, theme, state as never).render(80).join("\n");
+			assert.ok(!text.includes("+1 / −1"));
+		}
+	});
+});
+
 describe("Pi 1.x public renderer resolver", () => {
 	afterEach(() => { uninstallGlobalClaudeToolPatch(); });
 
@@ -352,9 +601,17 @@ describe("Pi 1.x public renderer resolver", () => {
 		const base: ToolRenderers = { renderShell: "default", renderCall: () => call, renderResult: () => result };
 		const wrapped = resolver!("custom", () => base)!;
 		const theme = createMockTheme();
-		assert.equal(wrapped.renderCall!({}, theme, { expanded: true } as never), call);
-		assert.equal(wrapped.renderResult!({ content: [], details: {} }, { expanded: true, isPartial: false }, theme, {} as never), result);
-		assert.equal(wrapped.renderResult!({ content: [{ type: "image", data: "", mimeType: "image/png" }], details: {} }, { expanded: false, isPartial: false }, theme, {} as never), result);
+		const expandedCall = wrapped.renderCall!({}, theme, { expanded: true } as never);
+		assert.ok(expandedCall instanceof Container);
+		assert.ok(expandedCall.render(80).join("\n").includes("Custom"));
+		assert.ok(expandedCall.children[1] instanceof Box);
+		assert.equal(expandedCall.children[1].children[0], call);
+		const expandedResult = wrapped.renderResult!({ content: [], details: {} }, { expanded: true, isPartial: false }, theme, {} as never);
+		assert.ok(expandedResult instanceof Box);
+		assert.equal(expandedResult.children[0], result);
+		const imageResult = wrapped.renderResult!({ content: [{ type: "image", data: "", mimeType: "image/png" }], details: {} }, { expanded: false, isPartial: false }, theme, {} as never);
+		assert.ok(imageResult instanceof Box);
+		assert.equal(imageResult.children[0], result);
 		setClaudeToolsEnabled(pi, false, "/tmp");
 		assert.equal(resolver!("custom", () => base), base);
 		assert.equal(registered.length, 0);
@@ -483,7 +740,7 @@ describe("global patch (generic tools)", () => {
 	});
 });
 
-describe("dynamic toggle (/cc-tools)", () => {
+describe("dynamic toggle (/arda-tools)", () => {
 	afterEach(() => {
 		try {
 			uninstallGlobalClaudeToolPatch();
@@ -518,12 +775,13 @@ describe("dynamic toggle (/cc-tools)", () => {
 		assert.equal(isGlobalClaudeToolPatchInstalled(), true);
 	});
 
-	it("cc-tools command toggles state and notifies", async () => {
+	it("arda-tools toggles state and notifies without registering the retired alias", async () => {
 		const { pi, commands, notifications } = createMockPi(["bash"]);
 		setClaudeToolsEnabled(pi, true, "/tmp");
 		registerToolRenderers(pi);
-		const cmd = commands["cc-tools"];
+		const cmd = commands["arda-tools"];
 		assert.ok(cmd);
+		assert.ok(!Object.hasOwn(commands, "cc-tools"));
 		const ctx = {
 			cwd: "/tmp",
 			ui: {
